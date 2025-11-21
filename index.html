@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>A-Frame De AR</title>
+    
+    <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+    
+    <script>
+        // 常量定义
+        const COLOR_DEFAULT_ZONE = '#0000FF'; // 蓝色
+        const TRANSPARENT_OPACITY = 0.2; // Box 在 Zone 内的透明度
+        const OPAQUE_OPACITY = 1.0;      // Box 在 Zone 外的不透明度
+
+        // --- 核心组件 ---
+
+        // === 1. 双捏合创建/删除组件 (Double Pinch Creator/Deleter) ===
+        AFRAME.registerComponent('double-pinch-creator-deleter', {
+          init: function () {
+            const el = this.el; 
+            this.lastPinchTime = 0;
+            this.doubleClickThreshold = 300; 
+            this.sceneEl = document.querySelector('a-scene');
+            const self = this;
+
+            el.addEventListener('pinchstarted', function (evt) {
+              const currentTime = Date.now();
+              
+              if (currentTime - self.lastPinchTime < self.doubleClickThreshold) {
+                self.handleDoublePinch(evt.detail.position);
+                self.lastPinchTime = 0;
+              } else {
+                self.lastPinchTime = currentTime;
+              }
+            });
+          },
+          
+          handleDoublePinch: function (pinchWorldPosition) {
+            const rightGrabControls = document.getElementById('rightHand').components['hand-tracking-grab-controls'];
+            const grabbedEl = rightGrabControls ? rightGrabControls.grabbedEl : null;
+
+            if (grabbedEl && grabbedEl.hasAttribute('grabbable')) {
+              // 删除 Box 或 Zone
+              console.log('Entity deleted via left hand double pinch confirmation!');
+              if (grabbedEl.parentNode) {
+                grabbedEl.parentNode.removeChild(grabbedEl);
+              }
+            } else {
+              // 创建 Box
+              this.createBox(pinchWorldPosition);
+            }
+          },
+          
+          createBox: function (pinchWorldPosition) {
+            const newBox = document.createElement('a-box');
+            
+            newBox.setAttribute('width', 0.1);
+            newBox.setAttribute('height', 0.1);
+            newBox.setAttribute('depth', 0.1);
+            newBox.setAttribute('color', `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`); 
+            newBox.setAttribute('shadow', '');
+            newBox.setAttribute('grabbable', ''); 
+            
+            // 确保 Box 材质支持透明度
+            newBox.setAttribute('material', 'transparent: true; opacity: 1.0;'); 
+            
+            newBox.setAttribute('position', `${pinchWorldPosition.x} ${pinchWorldPosition.y} ${pinchWorldPosition.z}`);
+            
+            this.sceneEl.appendChild(newBox);
+            console.log('New box created via left hand double pinch!');
+          }
+        });
+
+        // === 2. Clipping Zone 创建组件 (Zone Creator) ===
+        AFRAME.registerComponent('zone-creator', {
+            init: function () {
+                this.sceneEl = document.querySelector('a-scene');
+                this.leftHand = this.el;
+                this.rightHand = document.getElementById('rightHand');
+                
+                this.isLeftPinching = false;
+                this.isRightPinching = false;
+                this.creationThreshold = 3000; // 3 秒 (ms)
+                this.isCreating = false;
+
+                this.leftHand.addEventListener('pinchstarted', (evt) => {
+                    this.isLeftPinching = true;
+                    this.leftPinchPosition = evt.detail.position; 
+                    this.checkStartCreation();
+                });
+                this.leftHand.addEventListener('pinchended', () => {
+                    this.isLeftPinching = false;
+                    this.checkEndCreation();
+                });
+
+                this.rightHand.addEventListener('pinchstarted', () => {
+                    this.isRightPinching = true;
+                    this.checkStartCreation();
+                });
+                this.rightHand.addEventListener('pinchended', () => {
+                    this.isRightPinching = false;
+                    this.checkEndCreation();
+                });
+            },
+
+            checkStartCreation: function() {
+                if (this.isLeftPinching && this.isRightPinching && !this.isCreating) {
+                    this.isCreating = true;
+                    console.log('Both hands pinching, starting creation timer...');
+                    
+                    this.timeout = setTimeout(() => {
+                        if (this.isLeftPinching && this.isRightPinching) {
+                            this.createClippingZone(this.leftPinchPosition);
+                            this.isCreating = false;
+                        }
+                    }, this.creationThreshold);
+                }
+            },
+
+            checkEndCreation: function() {
+                if (!this.isLeftPinching || !this.isRightPinching) {
+                    clearTimeout(this.timeout);
+                    if (this.isCreating) {
+                         console.log('Pinch released, creation cancelled.');
+                    }
+                    this.isCreating = false;
+                }
+            },
+
+            createClippingZone: function(leftPinchPosition) {
+                const newZone = document.createElement('a-box');
+                
+                const defaultSize = 0.3; // 默认尺寸
+                const pos = leftPinchPosition; 
+
+                newZone.setAttribute('zone', ''); // 标记为 Zone
+                newZone.setAttribute('grabbable', ''); // 可移动、可删除
+                
+                newZone.setAttribute('width', defaultSize);
+                newZone.setAttribute('height', defaultSize);
+                newZone.setAttribute('depth', defaultSize);
+                
+                newZone.setAttribute('position', `${pos.x} ${pos.y} ${pos.z}`);
+
+                // 视觉效果：蓝色虚线边框
+                newZone.setAttribute('material', `color: ${COLOR_DEFAULT_ZONE}; wireframe: true; transparent: true;`); 
+                newZone.setAttribute('shadow', '');
+                
+                this.sceneEl.appendChild(newZone);
+                console.log('Clipping Zone created!');
+            }
+        });
+
+
+        // === 3. Box 剪裁视觉化组件 (Box Cull Visualizer) ===
+        AFRAME.registerComponent('box-cull-visualizer', {
+            init: function() {
+                this.sceneEl = this.el;
+                // 创建 THREE.Box3 用于 Zone 和 Box 的边界计算
+                this.box3Zone = new AFRAME.THREE.Box3();
+                this.box3Box = new AFRAME.THREE.Box3();
+                this.tempMatrix = new AFRAME.THREE.Matrix4();
+            },
+
+            /**
+             * 检查 Box 是否完全包含在 Zone 内部。
+             * @param {Element} boxEl - Box 实体
+             * @param {Element} zoneEl - Zone 实体
+             * @returns {boolean} Box 是否完全在 Zone 内部
+             */
+            isBoxFullyContained(boxEl, zoneEl) {
+                const boxObj = boxEl.object3D;
+                const zoneObj = zoneEl.object3D;
+                
+                if (!boxObj || !zoneObj) return false;
+
+                // 1. 获取 Zone 的边界框 (AABB)
+                // Zone 通常不需要旋转，但安全起见，应考虑世界坐标
+                this.box3Zone.setFromObject(zoneObj); 
+                
+                // 2. 获取 Box 的边界框 (AABB)
+                this.box3Box.setFromObject(boxObj);
+                
+                // 3. 检查 Box 的边界是否完全在 Zone 的边界内
+                const zoneMin = this.box3Zone.min;
+                const zoneMax = this.box3Zone.max;
+                const boxMin = this.box3Box.min;
+                const boxMax = this.box3Box.max;
+
+                return (
+                    boxMin.x >= zoneMin.x && boxMax.x <= zoneMax.x &&
+                    boxMin.y >= zoneMin.y && boxMax.y <= zoneMax.y &&
+                    boxMin.z >= zoneMin.z && boxMax.z <= zoneMax.z
+                );
+            },
+
+            tick: function() {
+                // 查找所有 Zones 和 Boxes
+                const zoneEls = this.sceneEl.querySelectorAll('[zone]');
+                const boxEls = this.sceneEl.querySelectorAll('a-box[grabbable]:not([zone])');
+
+                if (zoneEls.length === 0 || boxEls.length === 0) return;
+
+                // 遍历每个 Box
+                boxEls.forEach(boxEl => {
+                    let isContainedInAnyZone = false;
+
+                    // 检查 Box 是否在任何一个 Zone 内部
+                    for (let i = 0; i < zoneEls.length; i++) {
+                        if (this.isBoxFullyContained(boxEl, zoneEls[i])) {
+                            isContainedInAnyZone = true;
+                            break; // 只要在一个 Zone 内就足够了
+                        }
+                    }
+
+                    // 根据包含状态设置透明度
+                    const currentOpacity = boxEl.getAttribute('material').opacity;
+                    
+                    if (isContainedInAnyZone) {
+                        if (currentOpacity !== TRANSPARENT_OPACITY) {
+                            boxEl.setAttribute('material', 'opacity', TRANSPARENT_OPACITY);
+                            boxEl.setAttribute('material', 'transparent', true); // 确保 transparent 标志设置
+                            console.log(`Box ${boxEl.id || boxEl.getAttribute('position')} is transparent.`);
+                        }
+                    } else {
+                        if (currentOpacity !== OPAQUE_OPACITY) {
+                            boxEl.setAttribute('material', 'opacity', OPAQUE_OPACITY);
+                            boxEl.setAttribute('material', 'transparent', true); 
+                            console.log(`Box ${boxEl.id || boxEl.getAttribute('position')} is opaque.`);
+                        }
+                    }
+                });
+            }
+        });
+
+    </script>
+    
+    <style>
+        body { margin: 0; overflow: hidden; }
+    </style>
+</head>
+<body>
+    
+    <a-scene xr-mode-ui="XRMode: ar" box-cull-visualizer> 
+        
+        <a-box 
+            position="0 1.0 -0.6" 
+            rotation="0 45 0" 
+            width="0.1" 
+            height="0.1" 
+            depth="0.1" 
+            color="#FF0000"
+            shadow
+            grabbable
+            material="transparent: true; opacity: 1.0;"> 
+        </a-box>
+
+        <a-entity 
+            id="leftHand" 
+            hand-tracking-controls="hand: left"
+            double-pinch-creator-deleter
+            zone-creator>
+        </a-entity>
+
+        <a-entity 
+            id="rightHand" 
+            hand-tracking-controls="hand: right"
+            hand-tracking-grab-controls="hand: right; hoverEnabled: true;">
+        </a-entity>
+        
+        <a-entity light="type: point; intensity: 1.5; decay: 2; color: #FFFFFF;" position="0 1 0"></a-entity>
+        <a-entity light="type: ambient; intensity: 0.5;"></a-entity>
+
+    </a-scene>
+
+</body>
+</html>
