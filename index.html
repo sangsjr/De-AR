@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>A-Frame 1.7.0 AR 最终稳定版 - Magic Window 修复 (相交模式)</title>
+    <title>A-Frame 1.7.0 AR 最终稳定版 - Magic Window 2D/3D 混合元素 (收缩范围)</title>
     
     <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
     
@@ -11,14 +11,19 @@
         const TRANSPARENT_OPACITY = 0.2; 
         const OPAQUE_OPACITY = 1.0;      
         const MAGIC_WINDOW_Z_POS = -0.5; 
+        const ELEMENT_SIZE = 0.1; 
+        
+        // 范围调整常量
+        const SHRINK_FACTOR = 0.9; // 新增：将检测范围收缩 10% (0.9)，以弥补相交检测的视觉扩大效应
 
-        // --- THREE.js 辅助对象 (避免在 tick 中重复创建) ---
+        // --- THREE.js 辅助对象 (不变) ---
         const tempVector = new AFRAME.THREE.Vector3();
         const box3 = new AFRAME.THREE.Box3();
         const boxVertices = [
             new AFRAME.THREE.Vector3(), new AFRAME.THREE.Vector3(), new AFRAME.THREE.Vector3(), new AFRAME.THREE.Vector3(),
             new AFRAME.THREE.Vector3(), new AFRAME.THREE.Vector3(), new AFRAME.THREE.Vector3(), new AFRAME.THREE.Vector3(),
         ];
+        // ... (其他不变的代码)
 
 
         // === 1. 双捏合创建/删除组件 (Double Pinch Creator/Deleter) - 不变 ===
@@ -43,29 +48,39 @@
           handleDoublePinch: function (pinchWorldPosition) {
             const rightGrabControls = document.getElementById('rightHand').components['hand-tracking-grab-controls'];
             const grabbedEl = rightGrabControls ? rightGrabControls.grabbedEl : null;
-
+            
             if (grabbedEl && grabbedEl.hasAttribute('grabbable')) {
               console.log('Entity deleted via left hand double pinch confirmation!');
               if (grabbedEl.parentNode) {
                 grabbedEl.parentNode.removeChild(grabbedEl);
               }
             } else {
-              this.createBox(pinchWorldPosition);
+              this.createRandomElement(pinchWorldPosition);
             }
           },
           
-          createBox: function (pinchWorldPosition) {
-            const newBox = document.createElement('a-box');
-            newBox.setAttribute('width', 0.1);
-            newBox.setAttribute('height', 0.1);
-            newBox.setAttribute('depth', 0.1);
-            newBox.setAttribute('color', `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`); 
-            newBox.setAttribute('shadow', '');
-            newBox.setAttribute('grabbable', ''); 
-            newBox.setAttribute('material', 'transparent: true; opacity: 1.0;'); 
-            newBox.setAttribute('position', `${pinchWorldPosition.x} ${pinchWorldPosition.y} ${pinchWorldPosition.z}`);
-            this.sceneEl.appendChild(newBox);
-            console.log('New box created via left hand double pinch!');
+          createRandomElement: function (pinchWorldPosition) {
+            const isBox = Math.random() < 0.5; 
+            let newElement;
+
+            if (isBox) {
+                newElement = document.createElement('a-box');
+                newElement.setAttribute('depth', ELEMENT_SIZE); 
+            } else {
+                newElement = document.createElement('a-plane');
+                newElement.setAttribute('rotation', '0 0 0'); 
+            }
+            
+            newElement.setAttribute('width', ELEMENT_SIZE);
+            newElement.setAttribute('height', ELEMENT_SIZE);
+            newElement.setAttribute('color', `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`); 
+            newElement.setAttribute('shadow', '');
+            newElement.setAttribute('grabbable', ''); 
+            newElement.setAttribute('material', 'transparent: true; opacity: 1.0; side: double;'); 
+            newElement.setAttribute('position', `${pinchWorldPosition.x} ${pinchWorldPosition.y} ${pinchWorldPosition.z}`);
+            
+            this.sceneEl.appendChild(newElement);
+            console.log(`New ${isBox ? 'Box (3D)' : 'Plane (2D)'} created via left hand double pinch!`);
           }
         });
 
@@ -111,8 +126,9 @@
                 newWindow.setAttribute('grabbable', ''); 
                 
                 newWindow.setAttribute('geometry', 'primitive: plane; width: 0.4; height: 0.3;'); 
-                newWindow.setAttribute('position', `0 -0.1 ${MAGIC_WINDOW_Z_POS}`); 
+                newWindow.setAttribute('position', `0 0 ${MAGIC_WINDOW_Z_POS}`); 
                 newWindow.setAttribute('material', `color: ${COLOR_DEFAULT_ZONE}; wireframe: true; transparent: true; opacity: 1.0;`); 
+                newWindow.setAttribute('scale', '1 1 1'); 
                 
                 this.cameraAnchorEl.appendChild(newWindow); 
                 console.log('Magic Window created and anchored to camera!');
@@ -120,7 +136,7 @@
         });
 
 
-        // === 3. Box 剪裁视觉化组件 (Box Cull Visualizer) - 修复为相交模式 ===
+        // === 3. 元素剔除视觉化组件 (Cull Visualizer) - 修复投影范围 ===
         AFRAME.registerComponent('box-cull-visualizer', {
             init: function() {
                 this.sceneEl = this.el;
@@ -128,28 +144,23 @@
                 this.windowEl = null; 
             },
 
-            /**
-             * 检查 Box 是否部分或完全在 Magic Window 的视锥体中。
-             * 逻辑已修改为：只要有一个 Box 的顶点满足深度和投影条件，即视为相交。
-             */
-            isBoxFullyContained(boxEl, windowEl) {
-                const boxObj = boxEl.object3D;
-                if (!boxObj || !this.cameraEl.object3D) return false;
+            isElementContained(el, windowEl) {
+                const elObj = el.object3D;
+                if (!elObj || !this.cameraEl.object3D) return false;
 
-                const boxMesh = boxEl.getObject3D('mesh');
-                if (!boxMesh || !boxMesh.geometry) {
+                const elMesh = el.getObject3D('mesh');
+                if (!elMesh || !elMesh.geometry) {
                     return false;
                 }
                 
-                // 1. 获取 Box 的世界边界框 (World AABB)
-                boxObj.updateMatrixWorld(true);
-                box3.setFromObject(boxMesh); 
+                elObj.updateMatrixWorld(true);
+                box3.setFromObject(elMesh); 
                 
                 if (box3.isEmpty()) {
                     return false;
                 }
                 
-                // --- 手动计算 Box3 的 8 个顶点 ---
+                // --- 手动计算 Box3 的 8 个顶点 (不变) ---
                 const min = box3.min;
                 const max = box3.max;
                 
@@ -169,10 +180,14 @@
                 const windowWidth = 0.4;
                 const windowHeight = 0.3;
                 const windowZ = MAGIC_WINDOW_Z_POS;
-                const windowCenterYLocal = -0.1; 
+                const windowCenterYLocal = 0; 
 
-                // 3. 检查 Box 的 8 个顶点中是否有任何一个满足相交条件
-                let isContained = false; // 初始假设不相交
+                // *** 核心修改：应用收缩因子 ***
+                const adjustedHalfWidth = (windowWidth / 2) * SHRINK_FACTOR;
+                const adjustedHalfHeight = (windowHeight / 2) * SHRINK_FACTOR;
+
+                // 3. 检查 8 个顶点中是否有任何一个满足相交条件
+                let isContained = false; 
                 
                 for (let i = 0; i < 8; i++) {
                     const vertexWorld = boxVertices[i];
@@ -185,14 +200,12 @@
                     const vy = tempVector.y;
                     const vz = tempVector.z; 
 
-                    // b) 深度检查 (必须在 Window 后面)
+                    // b) 深度检查 (使用微小容差)
                     if (vz > windowZ + 0.001) { 
-                        // 此顶点在 Window 前面，不考虑相交
                         continue; 
                     }
 
                     // c) 投影检查
-                    // Z 必须是负数
                     if (vz >= 0) {
                         continue; 
                     }
@@ -202,55 +215,46 @@
                     const projectedX = vx * projectionFactor;
                     const projectedY = vy * projectionFactor;
                     
-                    const halfWidth = windowWidth / 2;
-                    const halfHeight = windowHeight / 2;
-                    
                     const windowCenterYProjected = windowCenterYLocal * projectionFactor;
                     
-                    // 检查投影是否在 Window 矩形范围内
-                    if (projectedX >= -halfWidth && projectedX <= halfWidth &&
-                        projectedY >= (windowCenterYProjected - halfHeight) && projectedY <= (windowCenterYProjected + halfHeight)) 
+                    // 检查投影是否在调整后的 Window 矩形范围内
+                    if (projectedX >= -adjustedHalfWidth && projectedX <= adjustedHalfWidth &&
+                        projectedY >= (windowCenterYProjected - adjustedHalfHeight) && projectedY <= (windowCenterYProjected + adjustedHalfHeight)) 
                     {
-                        // 找到一个满足条件的顶点，视为相交
                         isContained = true; 
-                        break; // 找到一个即可，跳出循环
+                        break; 
                     }
                 }
 
-                // 返回判断结果
                 return isContained;
             },
 
             tick: function() {
                 const windowEls = this.sceneEl.querySelectorAll('[magic-window]');
-                const boxEls = this.sceneEl.querySelectorAll('a-box[grabbable]:not([magic-window])');
+                const targetEls = this.sceneEl.querySelectorAll('a-box[grabbable]:not([magic-window]), a-plane[grabbable]:not([magic-window])');
 
-                if (boxEls.length === 0) return;
+                if (targetEls.length === 0) return;
 
-                boxEls.forEach(boxEl => {
+                targetEls.forEach(el => {
                     let isContainedInAnyWindow = false;
 
-                    // 检查 Box 是否与任何一个 Magic Window 的视锥体相交
                     for (let i = 0; i < windowEls.length; i++) {
-                        // isBoxFullyContained 现在执行的是相交测试
-                        if (this.isBoxFullyContained(boxEl, windowEls[i])) { 
+                        if (this.isElementContained(el, windowEls[i])) { 
                             isContainedInAnyWindow = true;
                             break; 
                         }
                     }
 
-                    // 设置透明度
-                    const currentOpacity = boxEl.getAttribute('material').opacity;
+                    const currentMaterial = el.getAttribute('material');
+                    const currentOpacity = currentMaterial.opacity;
                     
                     if (isContainedInAnyWindow) {
                         if (currentOpacity !== TRANSPARENT_OPACITY) {
-                            boxEl.setAttribute('material', 'opacity', TRANSPARENT_OPACITY);
-                            boxEl.setAttribute('material', 'transparent', true); 
+                            el.setAttribute('material', {opacity: TRANSPARENT_OPACITY, transparent: true, side: currentMaterial.side || 'double'}); 
                         }
                     } else {
                         if (currentOpacity !== OPAQUE_OPACITY) {
-                            boxEl.setAttribute('material', 'opacity', OPAQUE_OPACITY);
-                            boxEl.setAttribute('material', 'transparent', true); 
+                            el.setAttribute('material', {opacity: OPAQUE_OPACITY, transparent: true, side: currentMaterial.side || 'double'});
                         }
                     }
                 });
