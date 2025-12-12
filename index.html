@@ -7,18 +7,13 @@
     <script id="vertexShader" type="x-shader/x-vertex">
         varying vec2 vUv;
         varying vec3 vNormal;
-        varying vec3 vViewPosition; // 传递视图空间坐标
+        varying vec3 vViewPosition; 
 
         void main() {
             vUv = uv;
             vNormal = normalize(normalMatrix * normal);
-
-            // 计算相对于相机的坐标 (View Space)
-            // 在 Three.js 中，相机位于原点 (0,0,0) 看向 -Z 方向
             vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-            
             vViewPosition = mvPosition.xyz;
-
             gl_Position = projectionMatrix * mvPosition;
         }
     </script>
@@ -26,16 +21,13 @@
     <script id="fragmentShader" type="x-shader/x-fragment">
         uniform vec3 uBaseColor;
         
-        // Magic Window 参数 (必须与 JS 中的设置匹配)
-        // Window 固定在相机前方 Z = -0.5 的位置
+        // --- 修改点 1：增加控制开关 ---
+        uniform float uWindowActive; // 1.0 = 显示/生效, 0.0 = 不显示/不生效
+
         const float WINDOW_Z = -0.5;
         const float WINDOW_WIDTH = 0.4;
         const float WINDOW_HEIGHT = 0.3;
-        
-        // 收缩因子，避免边缘闪烁
         const float SHRINK_FACTOR = 0.9; 
-
-        // 透明度定义
         const float OPACITY_TRANSPARENT = 0.2;
         const float OPACITY_OPAQUE = 1.0;
 
@@ -44,33 +36,26 @@
         varying vec3 vViewPosition;
 
         void main() {
-            // 简单光照
             vec3 lightDir = normalize(vec3(0.5, 0.8, 1.0));
             float diff = max(dot(vNormal, lightDir), 0.0);
             vec3 finalColor = uBaseColor * (0.5 + 0.5 * diff);
 
             float alpha = OPACITY_OPAQUE;
 
-            // --- 核心逻辑 ---
-            
-            // 1. 深度检查：物体必须在 Window 后面 (Z 更小/更负) 才能通过 Window 看到
-            // 如果物体在 Window 前面 (比如 Z = -0.2)，它遮挡了 Window，不应变透明
-            if (vViewPosition.z < WINDOW_Z) {
-                
-                // 2. 投影计算 (相似三角形)
-                // 计算当前像素点投影到 Z = -0.5 平面上的坐标
-                float projectionFactor = WINDOW_Z / vViewPosition.z;
-                
-                float projectedX = vViewPosition.x * projectionFactor;
-                float projectedY = vViewPosition.y * projectionFactor;
+            // --- 修改点 2：只有当 Window 激活时才计算透明度 ---
+            if (uWindowActive > 0.5) {
+                // 核心逻辑：深度检查
+                if (vViewPosition.z < WINDOW_Z) {
+                    float projectionFactor = WINDOW_Z / vViewPosition.z;
+                    float projectedX = vViewPosition.x * projectionFactor;
+                    float projectedY = vViewPosition.y * projectionFactor;
 
-                // 3. 范围检查
-                float limitX = (WINDOW_WIDTH / 2.0) * SHRINK_FACTOR;
-                float limitY = (WINDOW_HEIGHT / 2.0) * SHRINK_FACTOR;
+                    float limitX = (WINDOW_WIDTH / 2.0) * SHRINK_FACTOR;
+                    float limitY = (WINDOW_HEIGHT / 2.0) * SHRINK_FACTOR;
 
-                // 如果投影点在 Window 矩形内
-                if (abs(projectedX) <= limitX && abs(projectedY) <= limitY) {
-                    alpha = OPACITY_TRANSPARENT;
+                    if (abs(projectedX) <= limitX && abs(projectedY) <= limitY) {
+                        alpha = OPACITY_TRANSPARENT;
+                    }
                 }
             }
 
@@ -84,6 +69,9 @@
         const MAGIC_WINDOW_Z_POS = -0.5; 
         const ELEMENT_SIZE = 0.1; 
 
+        // --- 修改点 3：全局变量记录窗口状态 ---
+        let isMagicWindowVisible = false;
+
         // === 组件：应用 Magic Shader ===
         AFRAME.registerComponent('apply-magic-shader', {
             schema: {
@@ -91,7 +79,6 @@
             },
             
             init: function() {
-                // 直接从 HTML 标签获取 Shader 内容，无需 fetch
                 const vShader = document.getElementById('vertexShader').textContent;
                 const fShader = document.getElementById('fragmentShader').textContent;
                 
@@ -99,24 +86,22 @@
                     vertexShader: vShader,
                     fragmentShader: fShader,
                     uniforms: {
-                        uBaseColor: { value: new AFRAME.THREE.Color(this.data.color) }
+                        uBaseColor: { value: new AFRAME.THREE.Color(this.data.color) },
+                        // 初始化时根据全局状态设置
+                        uWindowActive: { value: isMagicWindowVisible ? 1.0 : 0.0 }
                     },
                     transparent: true,
                     side: AFRAME.THREE.DoubleSide
                 });
 
-                // 获取 mesh 并应用材质
                 const mesh = this.el.getObject3D('mesh');
                 if (mesh) {
                     mesh.material = this.material;
                 } else {
-                    // 如果 mesh 还没生成（例如 primitive刚创建），监听 model-loaded
                     this.el.addEventListener('model-loaded', () => {
                         const mesh = this.el.getObject3D('mesh');
                         if (mesh) mesh.material = this.material;
                     });
-                    // 对于基础几何体 (a-box, a-plane)，通常 mesh 在 loaded 时也未必立即可用，
-                    // 这里的 setTimeout 是个保险
                     setTimeout(() => {
                          const mesh = this.el.getObject3D('mesh');
                          if (mesh) mesh.material = this.material;
@@ -128,10 +113,18 @@
                 if (this.material) {
                     this.material.uniforms.uBaseColor.value.set(this.data.color);
                 }
+            },
+
+            // --- 修改点 4：供外部调用的更新方法 ---
+            setWindowActive: function(isActive) {
+                if (this.material) {
+                    this.material.uniforms.uWindowActive.value = isActive ? 1.0 : 0.0;
+                    this.material.needsUpdate = true;
+                }
             }
         });
 
-        // === 组件：双捏合创建/删除 ===
+        // === 组件：双捏合创建/删除 (保持原样) ===
         AFRAME.registerComponent('double-pinch-creator-deleter', {
           init: function () {
             const el = this.el; 
@@ -178,10 +171,7 @@
             
             newElement.setAttribute('width', ELEMENT_SIZE);
             newElement.setAttribute('height', ELEMENT_SIZE);
-            
-            // 关键：应用 Shader 组件
             newElement.setAttribute('apply-magic-shader', `color: ${randomColor}`);
-            
             newElement.setAttribute('shadow', '');
             newElement.setAttribute('grabbable', ''); 
             newElement.setAttribute('position', `${pinchWorldPosition.x} ${pinchWorldPosition.y} ${pinchWorldPosition.z}`);
@@ -190,7 +180,7 @@
           }
         });
 
-        // === 组件：Magic Window 线框创建 (仅视觉) ===
+        // === 组件：Magic Window 线框创建 (修改为切换模式) ===
         AFRAME.registerComponent('magic-window-creator', {
             init: function () {
                 this.cameraAnchorEl = document.getElementById('cameraAnchor'); 
@@ -203,7 +193,7 @@
 
                 this.leftHand.addEventListener('pinchstarted', (evt) => { this.isLeftPinching = true; this.checkStartCreation(); });
                 this.leftHand.addEventListener('pinchended', () => { this.isLeftPinching = false; this.checkEndCreation(); });
-                this.rightHand.addEventListener('pinchstarted', () => { this.isRightPinching = true; this.checkStartCreation(); });
+                this.rightHand.addEventListener('pinchstarted', (evt) => { this.isRightPinching = true; this.checkStartCreation(); });
                 this.rightHand.addEventListener('pinchended', () => { this.isRightPinching = false; this.checkEndCreation(); });
             },
 
@@ -212,7 +202,8 @@
                     this.isCreating = true;
                     this.timeout = setTimeout(() => {
                         if (this.isLeftPinching && this.isRightPinching) {
-                            this.createMagicWindow();
+                            // --- 修改点 5：改为调用 Toggle ---
+                            this.toggleMagicWindow();
                             this.isCreating = false;
                         }
                     }, this.creationThreshold);
@@ -226,20 +217,39 @@
                 }
             },
 
-            createMagicWindow: function() {
-                // 清除旧的 (如果只想保留一个)
-                this.cameraAnchorEl.innerHTML = '';
+            // --- 修改点 6：实现切换逻辑 ---
+            toggleMagicWindow: function() {
+                // 检查窗口是否存在
+                const existingWindow = this.cameraAnchorEl.firstElementChild;
 
-                const newWindow = document.createElement('a-entity');
-                newWindow.setAttribute('magic-window', ''); 
-                
-                // 这里的尺寸必须和 Shader 中的 WINDOW_WIDTH/HEIGHT 对应
-                newWindow.setAttribute('geometry', 'primitive: plane; width: 0.4; height: 0.3;'); 
-                newWindow.setAttribute('position', `0 0 ${MAGIC_WINDOW_Z_POS}`); 
-                newWindow.setAttribute('material', `color: ${COLOR_DEFAULT_ZONE}; wireframe: true; transparent: true; opacity: 1.0;`); 
-                
-                this.cameraAnchorEl.appendChild(newWindow); 
-                console.log('Magic Window wireframe created!');
+                if (existingWindow) {
+                    // 1. 删除可视化窗口
+                    this.cameraAnchorEl.innerHTML = '';
+                    console.log('Magic Window DEACTIVATED');
+                    
+                    // 2. 更新状态
+                    isMagicWindowVisible = false;
+                } else {
+                    // 1. 创建可视化窗口
+                    const newWindow = document.createElement('a-entity');
+                    newWindow.setAttribute('magic-window', ''); 
+                    newWindow.setAttribute('geometry', 'primitive: plane; width: 0.4; height: 0.3;'); 
+                    newWindow.setAttribute('position', `0 0 ${MAGIC_WINDOW_Z_POS}`); 
+                    newWindow.setAttribute('material', `color: ${COLOR_DEFAULT_ZONE}; wireframe: true; transparent: true; opacity: 1.0;`); 
+                    this.cameraAnchorEl.appendChild(newWindow); 
+                    console.log('Magic Window ACTIVATED');
+
+                    // 2. 更新状态
+                    isMagicWindowVisible = true;
+                }
+
+                // 3. 通知所有现有的物体更新 Shader
+                const allObjects = document.querySelectorAll('[apply-magic-shader]');
+                allObjects.forEach(el => {
+                    if (el.components['apply-magic-shader']) {
+                        el.components['apply-magic-shader'].setWindowActive(isMagicWindowVisible);
+                    }
+                });
             }
         });
 
