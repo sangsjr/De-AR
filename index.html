@@ -1,8 +1,9 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>A-Frame AR Magic Window (Shader Fixed)</title>
+    <title>A-Frame AR Movable Magic Window</title>
     <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+    <script src="https://unpkg.com/aframe-look-at-component@0.8.0/dist/aframe-look-at-component.min.js"></script>
 
     <script id="vertexShader" type="x-shader/x-vertex">
         varying vec2 vUv;
@@ -20,11 +21,11 @@
 
     <script id="fragmentShader" type="x-shader/x-fragment">
         uniform vec3 uBaseColor;
+        uniform float uWindowActive; // 1.0 = 开启, 0.0 = 关闭
         
-        // --- 修改点 1：增加控制开关 ---
-        uniform float uWindowActive; // 1.0 = 显示/生效, 0.0 = 不显示/不生效
+        // --- 修改点 A: 接收动态的窗口位置 (View Space) ---
+        uniform vec3 uWindowCenterVS; 
 
-        const float WINDOW_Z = -0.5;
         const float WINDOW_WIDTH = 0.4;
         const float WINDOW_HEIGHT = 0.3;
         const float SHRINK_FACTOR = 0.9; 
@@ -42,18 +43,29 @@
 
             float alpha = OPACITY_OPAQUE;
 
-            // --- 修改点 2：只有当 Window 激活时才计算透明度 ---
             if (uWindowActive > 0.5) {
-                // 核心逻辑：深度检查
-                if (vViewPosition.z < WINDOW_Z) {
-                    float projectionFactor = WINDOW_Z / vViewPosition.z;
-                    float projectedX = vViewPosition.x * projectionFactor;
-                    float projectedY = vViewPosition.y * projectionFactor;
+                // --- 修改点 B: 动态深度计算逻辑 ---
+                // 获取窗口当前的深度 (Z 通常是负数)
+                float windowZ = uWindowCenterVS.z;
+
+                // 只有当物体在窗口后面时才计算 (Z值更小表示更远)
+                if (vViewPosition.z < windowZ) {
+                    
+                    // 计算投影比率：将物体上的点投影到窗口所在的平面上
+                    float projectionRatio = windowZ / vViewPosition.z;
+                    
+                    // 得到投影点在窗口平面上的坐标
+                    vec3 projectedPoint = vViewPosition * projectionRatio;
+
+                    // 计算投影点与窗口中心的距离 (在平面上)
+                    float dx = abs(projectedPoint.x - uWindowCenterVS.x);
+                    float dy = abs(projectedPoint.y - uWindowCenterVS.y);
 
                     float limitX = (WINDOW_WIDTH / 2.0) * SHRINK_FACTOR;
                     float limitY = (WINDOW_HEIGHT / 2.0) * SHRINK_FACTOR;
 
-                    if (abs(projectedX) <= limitX && abs(projectedY) <= limitY) {
+                    // 判断是否在矩形范围内
+                    if (dx <= limitX && dy <= limitY) {
                         alpha = OPACITY_TRANSPARENT;
                     }
                 }
@@ -64,13 +76,13 @@
     </script>
 
     <script>
-        // 常量定义
         const COLOR_DEFAULT_ZONE = '#0000FF'; 
-        const MAGIC_WINDOW_Z_POS = -0.5; 
         const ELEMENT_SIZE = 0.1; 
-
-        // --- 修改点 3：全局变量记录窗口状态 ---
+        
+        // 全局状态
         let isMagicWindowVisible = false;
+        // 缓存所有应用了Shader的物体，避免每帧 querySelector
+        let magicObjects = [];
 
         // === 组件：应用 Magic Shader ===
         AFRAME.registerComponent('apply-magic-shader', {
@@ -79,6 +91,9 @@
             },
             
             init: function() {
+                // 注册到全局列表
+                magicObjects.push(this);
+
                 const vShader = document.getElementById('vertexShader').textContent;
                 const fShader = document.getElementById('fragmentShader').textContent;
                 
@@ -87,44 +102,68 @@
                     fragmentShader: fShader,
                     uniforms: {
                         uBaseColor: { value: new AFRAME.THREE.Color(this.data.color) },
-                        // 初始化时根据全局状态设置
-                        uWindowActive: { value: isMagicWindowVisible ? 1.0 : 0.0 }
+                        uWindowActive: { value: isMagicWindowVisible ? 1.0 : 0.0 },
+                        // 初始化一个默认位置，会被 magic-window-sync 每帧更新
+                        uWindowCenterVS: { value: new AFRAME.THREE.Vector3(0, 0, -0.5) }
                     },
                     transparent: true,
                     side: AFRAME.THREE.DoubleSide
                 });
 
-                const mesh = this.el.getObject3D('mesh');
-                if (mesh) {
-                    mesh.material = this.material;
-                } else {
-                    this.el.addEventListener('model-loaded', () => {
-                        const mesh = this.el.getObject3D('mesh');
-                        if (mesh) mesh.material = this.material;
-                    });
-                    setTimeout(() => {
-                         const mesh = this.el.getObject3D('mesh');
-                         if (mesh) mesh.material = this.material;
-                    }, 100);
-                }
+                const applyMat = () => {
+                    const mesh = this.el.getObject3D('mesh');
+                    if (mesh) mesh.material = this.material;
+                };
+
+                if (this.el.getObject3D('mesh')) applyMat();
+                else this.el.addEventListener('model-loaded', applyMat);
             },
 
-            update: function() {
-                if (this.material) {
-                    this.material.uniforms.uBaseColor.value.set(this.data.color);
-                }
+            remove: function() {
+                // 移除时从列表中删除
+                const index = magicObjects.indexOf(this);
+                if (index > -1) magicObjects.splice(index, 1);
             },
 
-            // --- 修改点 4：供外部调用的更新方法 ---
             setWindowActive: function(isActive) {
                 if (this.material) {
                     this.material.uniforms.uWindowActive.value = isActive ? 1.0 : 0.0;
-                    this.material.needsUpdate = true;
+                }
+            },
+
+            // --- 修改点 C: 供外部调用的位置同步方法 ---
+            updateWindowPosition: function(viewSpacePos) {
+                if (this.material) {
+                    this.material.uniforms.uWindowCenterVS.value.copy(viewSpacePos);
                 }
             }
         });
 
-        // === 组件：双捏合创建/删除 (保持原样) ===
+        // === 新增组件：魔术窗口同步器 ===
+        // 挂载在窗口实体上，负责计算自己的 ViewSpace 坐标并广播给所有物体
+        AFRAME.registerComponent('magic-window-sync', {
+            init: function() {
+                this.camera = document.querySelector('a-scene').camera;
+                this.tempVec = new AFRAME.THREE.Vector3();
+            },
+            tick: function() {
+                if (!isMagicWindowVisible || !this.el.object3D) return;
+
+                // 1. 获取窗口的世界坐标
+                this.el.object3D.getWorldPosition(this.tempVec);
+
+                // 2. 将世界坐标转换为摄像机的视图空间坐标 (View Space)
+                // View Space: 摄像机为原点(0,0,0)，看向 -Z 方向
+                this.tempVec.applyMatrix4(this.camera.matrixWorldInverse);
+
+                // 3. 广播给所有带有 shader 的物体
+                for (let i = 0; i < magicObjects.length; i++) {
+                    magicObjects[i].updateWindowPosition(this.tempVec);
+                }
+            }
+        });
+
+        // === 组件：双捏合创建/删除 (保持不变) ===
         AFRAME.registerComponent('double-pinch-creator-deleter', {
           init: function () {
             const el = this.el; 
@@ -142,25 +181,20 @@
               }
             });
           },
-          
           handleDoublePinch: function (pinchWorldPosition) {
             const rightGrabControls = document.getElementById('rightHand').components['hand-tracking-grab-controls'];
             const grabbedEl = rightGrabControls ? rightGrabControls.grabbedEl : null;
-            
-            if (grabbedEl && grabbedEl.hasAttribute('grabbable')) {
-              if (grabbedEl.parentNode) {
-                grabbedEl.parentNode.removeChild(grabbedEl);
-              }
+            if (grabbedEl && grabbedEl.hasAttribute('grabbable') && !grabbedEl.classList.contains('magic-window')) {
+                // 防止误删魔术窗口
+                if (grabbedEl.parentNode) grabbedEl.parentNode.removeChild(grabbedEl);
             } else {
               this.createRandomElement(pinchWorldPosition);
             }
           },
-          
           createRandomElement: function (pinchWorldPosition) {
             const isBox = Math.random() < 0.5; 
             let newElement;
             const randomColor = `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`;
-
             if (isBox) {
                 newElement = document.createElement('a-box');
                 newElement.setAttribute('depth', ELEMENT_SIZE); 
@@ -168,32 +202,34 @@
                 newElement = document.createElement('a-plane');
                 newElement.setAttribute('rotation', '0 0 0'); 
             }
-            
             newElement.setAttribute('width', ELEMENT_SIZE);
             newElement.setAttribute('height', ELEMENT_SIZE);
             newElement.setAttribute('apply-magic-shader', `color: ${randomColor}`);
             newElement.setAttribute('shadow', '');
             newElement.setAttribute('grabbable', ''); 
             newElement.setAttribute('position', `${pinchWorldPosition.x} ${pinchWorldPosition.y} ${pinchWorldPosition.z}`);
-            
             this.sceneEl.appendChild(newElement);
           }
         });
 
-        // === 组件：Magic Window 线框创建 (修改为切换模式) ===
+        // === 组件：Magic Window 线框创建 (逻辑更新) ===
+        // === 组件：Magic Window 线框创建 (带状态文字提示) ===
         AFRAME.registerComponent('magic-window-creator', {
             init: function () {
-                this.cameraAnchorEl = document.getElementById('cameraAnchor'); 
+                this.sceneEl = document.querySelector('a-scene'); 
+                this.cameraEl = document.querySelector('#mainCamera');
                 this.leftHand = this.el;
                 this.rightHand = document.getElementById('rightHand');
                 this.isLeftPinching = false;
                 this.isRightPinching = false;
                 this.creationThreshold = 3000; 
                 this.isCreating = false;
+                
+                this.windowEl = null;
 
-                this.leftHand.addEventListener('pinchstarted', (evt) => { this.isLeftPinching = true; this.checkStartCreation(); });
+                this.leftHand.addEventListener('pinchstarted', () => { this.isLeftPinching = true; this.checkStartCreation(); });
                 this.leftHand.addEventListener('pinchended', () => { this.isLeftPinching = false; this.checkEndCreation(); });
-                this.rightHand.addEventListener('pinchstarted', (evt) => { this.isRightPinching = true; this.checkStartCreation(); });
+                this.rightHand.addEventListener('pinchstarted', () => { this.isRightPinching = true; this.checkStartCreation(); });
                 this.rightHand.addEventListener('pinchended', () => { this.isRightPinching = false; this.checkEndCreation(); });
             },
 
@@ -202,7 +238,6 @@
                     this.isCreating = true;
                     this.timeout = setTimeout(() => {
                         if (this.isLeftPinching && this.isRightPinching) {
-                            // --- 修改点 5：改为调用 Toggle ---
                             this.toggleMagicWindow();
                             this.isCreating = false;
                         }
@@ -217,38 +252,73 @@
                 }
             },
 
-            // --- 修改点 6：实现切换逻辑 ---
+            // --- 新增功能：显示状态文字 ---
+            showStatusText: function(message) {
+                const textEl = document.createElement('a-text');
+                textEl.setAttribute('value', message);
+                textEl.setAttribute('position', '0 2.0 -1.5'); // 你指定的位置
+                textEl.setAttribute('align', 'center');
+                textEl.setAttribute('color', '#FFFFFF'); // 白色字体
+                textEl.setAttribute('width', '5'); // 字体大小缩放
+                
+                // 让文字始终面向摄像机，方便阅读
+                textEl.setAttribute('look-at', '#mainCamera'); 
+
+                this.sceneEl.appendChild(textEl);
+
+                // 2秒后自动删除文字
+                setTimeout(() => {
+                    if (textEl.parentNode) {
+                        textEl.parentNode.removeChild(textEl);
+                    }
+                }, 2000);
+            },
+
             toggleMagicWindow: function() {
-                // 检查窗口是否存在
-                const existingWindow = this.cameraAnchorEl.firstElementChild;
-
-                if (existingWindow) {
-                    // 1. 删除可视化窗口
-                    this.cameraAnchorEl.innerHTML = '';
+                if (isMagicWindowVisible) {
+                    // --- 关闭逻辑 ---
+                    if (this.windowEl && this.windowEl.parentNode) {
+                        this.windowEl.parentNode.removeChild(this.windowEl);
+                        this.windowEl = null;
+                    }
                     console.log('Magic Window DEACTIVATED');
-                    
-                    // 2. 更新状态
                     isMagicWindowVisible = false;
-                } else {
-                    // 1. 创建可视化窗口
-                    const newWindow = document.createElement('a-entity');
-                    newWindow.setAttribute('magic-window', ''); 
-                    newWindow.setAttribute('geometry', 'primitive: plane; width: 0.4; height: 0.3;'); 
-                    newWindow.setAttribute('position', `0 0 ${MAGIC_WINDOW_Z_POS}`); 
-                    newWindow.setAttribute('material', `color: ${COLOR_DEFAULT_ZONE}; wireframe: true; transparent: true; opacity: 1.0;`); 
-                    this.cameraAnchorEl.appendChild(newWindow); 
-                    console.log('Magic Window ACTIVATED');
 
-                    // 2. 更新状态
+                    // 1. 调用显示文字
+                    this.showStatusText("Magic Window Deleted");
+                } else {
+                    // --- 开启逻辑 ---
+                    const camEl = document.getElementById('mainCamera');
+                    const position = new AFRAME.THREE.Vector3(0, 0, -0.5);
+                    position.applyMatrix4(camEl.object3D.matrixWorld);
+
+                    this.windowEl = document.createElement('a-entity');
+                    this.windowEl.setAttribute('geometry', 'primitive: plane; width: 0.4; height: 0.3;'); 
+                    this.windowEl.setAttribute('position', position); 
+                    
+                    this.windowEl.setAttribute('grabbable', '');
+                    this.windowEl.setAttribute('class', 'magic-window');
+                    
+                    // 注意：如果你之前修复了歪头问题，这里应该去掉 look-at，并依赖 magic-window-sync
+                    // 如果你使用的是旧代码，保留 look-at 也没问题，只是会有歪头不对齐的小bug
+                    this.windowEl.setAttribute('look-at', '#mainCamera'); 
+                    
+                    this.windowEl.setAttribute('magic-window-sync', '');
+                    
+                    // 蓝色线框透明度
+                    this.windowEl.setAttribute('material', `color: ${COLOR_DEFAULT_ZONE}; wireframe: true; transparent: true; opacity: 0.05; side: double;`); 
+                    
+                    this.sceneEl.appendChild(this.windowEl); 
+                    
+                    console.log('Magic Window ACTIVATED');
                     isMagicWindowVisible = true;
+
+                    // 2. 调用显示文字
+                    this.showStatusText("Magic Window Created");
                 }
 
-                // 3. 通知所有现有的物体更新 Shader
-                const allObjects = document.querySelectorAll('[apply-magic-shader]');
-                allObjects.forEach(el => {
-                    if (el.components['apply-magic-shader']) {
-                        el.components['apply-magic-shader'].setWindowActive(isMagicWindowVisible);
-                    }
+                magicObjects.forEach(cmp => {
+                    cmp.setWindowActive(isMagicWindowVisible);
                 });
             }
         });
@@ -263,12 +333,10 @@
     
     <a-scene xr-mode-ui="XRMode: ar"> 
         
-        <a-camera id="mainCamera">
-            <a-entity id="cameraAnchor"></a-entity>
-        </a-camera>
+        <a-camera id="mainCamera" position="0 1.6 0"></a-camera>
         
         <a-box 
-            position="0 1.0 -0.6" 
+            position="0 1.0 -0.5" 
             rotation="0 45 0" 
             width="0.1" 
             height="0.1" 
@@ -291,7 +359,7 @@
             hand-tracking-grab-controls="hand: right; hoverEnabled: true;">
         </a-entity>
         
-        <a-entity light="type: point; intensity: 1.5; decay: 2; color: #FFFFFF;" position="0 1 0"></a-entity>
+        <a-entity light="type: point; intensity: 1.5; decay: 2; color: #FFFFFF;" position="0 2 0"></a-entity>
         <a-entity light="type: ambient; intensity: 0.5;"></a-entity>
 
     </a-scene>
