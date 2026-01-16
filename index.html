@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>A-Frame AR Magic Volume - Near Clipping</title>
+    <title>A-Frame AR Magic Volume - Dynamic Silhouette</title>
     <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
 
     <script id="vertexShader" type="x-shader/x-vertex">
@@ -23,7 +23,6 @@
 
         varying vec3 vWorldPosition; 
 
-        // 射线与 AABB（轴对齐包围盒）求交函数
         vec2 rayBoxIntersection(vec3 ro, vec3 rd, vec3 halfDim) {
             vec3 m = 1.0 / rd;
             vec3 n = m * ro;
@@ -49,14 +48,8 @@
                 float tNear = hit.x;
                 float tFar = hit.y;
 
-                // 判定逻辑：
-                // 1. 射线必须撞击到立方体区域 (tNear < tFar)
-                // 2. 立方体必须在相机视线前方 (tFar > 0.0)
                 if (tNear < tFar && tFar > 0.0) {
                     float distToObj = distance(uCameraWorldPos, vWorldPosition);
-                    
-                    // 修正点：变透明的范围是相机到立方体远端的距离
-                    // 只要物体像素距离相机的距离 小于 视线穿透立方体出口的距离，就变透明
                     if (distToObj < tFar) {
                         alpha = 0.2;
                     }
@@ -116,6 +109,129 @@
                 if (this.material) {
                     this.material.uniforms.uWindowInvMat.value.copy(invMat);
                     this.material.uniforms.uBoxScale.value.copy(scale);
+                }
+            }
+        });
+
+        // 动态轮廓线组件
+        AFRAME.registerComponent('dynamic-silhouette', {
+            init: function() {
+                this.cameraPos = new AFRAME.THREE.Vector3();
+                this.boxCenter = new AFRAME.THREE.Vector3();
+                this.viewDir = new AFRAME.THREE.Vector3();
+                
+                // 定义立方体的12条边（每条边用两个顶点索引表示）
+                // 立方体顶点顺序: 0-7
+                this.edges = [
+                    [0, 1], [1, 2], [2, 3], [3, 0], // 底面
+                    [4, 5], [5, 6], [6, 7], [7, 4], // 顶面
+                    [0, 4], [1, 5], [2, 6], [3, 7]  // 竖边
+                ];
+                
+                // 定义立方体的6个面（每个面用4个顶点索引表示）
+                this.faces = [
+                    [0, 1, 2, 3], // 底面 (-Y)
+                    [4, 5, 6, 7], // 顶面 (+Y)
+                    [0, 1, 5, 4], // 前面 (-Z)
+                    [2, 3, 7, 6], // 后面 (+Z)
+                    [0, 3, 7, 4], // 左面 (-X)
+                    [1, 2, 6, 5]  // 右面 (+X)
+                ];
+                
+                // 面的法线（局部坐标系）
+                this.faceNormals = [
+                    new AFRAME.THREE.Vector3(0, -1, 0), // 底面
+                    new AFRAME.THREE.Vector3(0, 1, 0),  // 顶面
+                    new AFRAME.THREE.Vector3(0, 0, -1), // 前面
+                    new AFRAME.THREE.Vector3(0, 0, 1),  // 后面
+                    new AFRAME.THREE.Vector3(-1, 0, 0), // 左面
+                    new AFRAME.THREE.Vector3(1, 0, 0)   // 右面
+                ];
+                
+                // 每条边相邻的两个面的索引
+                this.edgeToFaces = [
+                    [0, 2], [0, 5], [0, 3], [0, 4], // 底面的4条边
+                    [1, 2], [1, 5], [1, 3], [1, 4], // 顶面的4条边
+                    [2, 4], [2, 5], [3, 5], [3, 4]  // 竖边的4条边
+                ];
+            },
+            
+            tick: function() {
+                const mesh = this.el.getObject3D('mesh');
+                if (!mesh) return;
+                
+                const camera = this.el.sceneEl.camera;
+                if (!camera) return;
+                
+                camera.getWorldPosition(this.cameraPos);
+                this.el.object3D.getWorldPosition(this.boxCenter);
+                this.viewDir.subVectors(this.cameraPos, this.boxCenter).normalize();
+                
+                // 遍历所有边，判断是否为轮廓边
+                const silhouetteEdges = [];
+                const normalMatrix = new AFRAME.THREE.Matrix3().getNormalMatrix(this.el.object3D.matrixWorld);
+                
+                for (let i = 0; i < this.edges.length; i++) {
+                    const [face1Idx, face2Idx] = this.edgeToFaces[i];
+                    
+                    // 变换法线到世界坐标系
+                    const normal1 = this.faceNormals[face1Idx].clone().applyMatrix3(normalMatrix).normalize();
+                    const normal2 = this.faceNormals[face2Idx].clone().applyMatrix3(normalMatrix).normalize();
+                    
+                    // 判断两个面相对于视角的朝向
+                    const dot1 = normal1.dot(this.viewDir);
+                    const dot2 = normal2.dot(this.viewDir);
+                    
+                    // 如果一个面朝向相机，另一个面背向相机，这条边就是轮廓边
+                    if (dot1 * dot2 < 0) {
+                        silhouetteEdges.push(this.edges[i]);
+                    }
+                }
+                
+                // 更新轮廓线的几何体
+                this.updateSilhouetteGeometry(silhouetteEdges);
+            },
+            
+            updateSilhouetteGeometry: function(silhouetteEdges) {
+                const mesh = this.el.getObject3D('mesh');
+                if (!mesh) return;
+                
+                // 查找轮廓线对象
+                let silhouetteLine = mesh.getObjectByName('silhouetteLine');
+                if (silhouetteLine) {
+                    mesh.remove(silhouetteLine);
+                    silhouetteLine.geometry.dispose();
+                }
+                
+                // 创建新的轮廓线几何体
+                if (silhouetteEdges.length > 0) {
+                    const w = WINDOW_BOX_SIZE.w / 2;
+                    const h = WINDOW_BOX_SIZE.h / 2;
+                    const d = WINDOW_BOX_SIZE.d / 2;
+                    
+                    // 立方体的8个顶点（局部坐标）
+                    const vertices = [
+                        [-w, -h, -d], [w, -h, -d], [w, -h, d], [-w, -h, d], // 底面 0-3
+                        [-w, h, -d],  [w, h, -d],  [w, h, d],  [-w, h, d]   // 顶面 4-7
+                    ];
+                    
+                    const positions = [];
+                    for (let edge of silhouetteEdges) {
+                        const [v1, v2] = edge;
+                        positions.push(...vertices[v1], ...vertices[v2]);
+                    }
+                    
+                    const geometry = new AFRAME.THREE.BufferGeometry();
+                    geometry.setAttribute('position', new AFRAME.THREE.Float32BufferAttribute(positions, 3));
+                    
+                    const material = new AFRAME.THREE.LineBasicMaterial({ 
+                        color: COLOR_DEFAULT_ZONE,
+                        linewidth: 2
+                    });
+                    
+                    silhouetteLine = new AFRAME.THREE.LineSegments(geometry, material);
+                    silhouetteLine.name = 'silhouetteLine';
+                    mesh.add(silhouetteLine);
                 }
             }
         });
@@ -207,17 +323,31 @@
                     pos.applyMatrix4(camEl.object3D.matrixWorld);
 
                     this.windowEl = document.createElement('a-entity');
-                    this.windowEl.setAttribute('geometry', `primitive: box; width: ${WINDOW_BOX_SIZE.w}; height: ${WINDOW_BOX_SIZE.h}; depth: ${WINDOW_BOX_SIZE.d};`); 
                     this.windowEl.setAttribute('position', pos); 
                     this.windowEl.setAttribute('grabbable', '');
                     this.windowEl.setAttribute('class', 'magic-window');
+                    this.windowEl.setAttribute('magic-window-sync', '');
+                    this.windowEl.setAttribute('dynamic-silhouette', ''); // 添加动态轮廓组件
                     
                     this.windowEl.addEventListener('loaded', () => {
+                        const boxGeometry = new AFRAME.THREE.BoxGeometry(
+                            WINDOW_BOX_SIZE.w, 
+                            WINDOW_BOX_SIZE.h, 
+                            WINDOW_BOX_SIZE.d
+                        );
+                        
+                        const boxMaterial = new AFRAME.THREE.MeshBasicMaterial({
+                            color: COLOR_DEFAULT_ZONE,
+                            transparent: true,
+                            opacity: 0.05,
+                            side: AFRAME.THREE.DoubleSide
+                        });
+                        const boxMesh = new AFRAME.THREE.Mesh(boxGeometry, boxMaterial);
+                        
+                        this.windowEl.setObject3D('mesh', boxMesh);
                         this.windowEl.object3D.lookAt(camEl.object3D.getWorldPosition(new AFRAME.THREE.Vector3()));
                     });
                     
-                    this.windowEl.setAttribute('magic-window-sync', '');
-                    this.windowEl.setAttribute('material', `color: ${COLOR_DEFAULT_ZONE}; wireframe: true; transparent: true; opacity: 0.3; side: double;`); 
                     this.sceneEl.appendChild(this.windowEl); 
                     isMagicWindowVisible = true;
                     this.showStatusText("Magic View Created");
