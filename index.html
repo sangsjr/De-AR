@@ -113,82 +113,71 @@
             }
         });
 
-        // 动态轮廓线组件
         AFRAME.registerComponent('dynamic-silhouette', {
             init: function() {
                 this.cameraPos = new AFRAME.THREE.Vector3();
                 this.boxCenter = new AFRAME.THREE.Vector3();
                 this.viewDir = new AFRAME.THREE.Vector3();
                 
-                // 定义立方体的12条边（每条边用两个顶点索引表示）
-                // 立方体顶点顺序: 0-7
+                // 12条边
                 this.edges = [
                     [0, 1], [1, 2], [2, 3], [3, 0], // 底面
                     [4, 5], [5, 6], [6, 7], [7, 4], // 顶面
                     [0, 4], [1, 5], [2, 6], [3, 7]  // 竖边
                 ];
                 
-                // 定义立方体的6个面（每个面用4个顶点索引表示）
-                this.faces = [
-                    [0, 1, 2, 3], // 底面 (-Y)
-                    [4, 5, 6, 7], // 顶面 (+Y)
-                    [0, 1, 5, 4], // 前面 (-Z)
-                    [2, 3, 7, 6], // 后面 (+Z)
-                    [0, 3, 7, 4], // 左面 (-X)
-                    [1, 2, 6, 5]  // 右面 (+X)
-                ];
-                
-                // 面的法线（局部坐标系）
+                // 面的局部法线
                 this.faceNormals = [
-                    new AFRAME.THREE.Vector3(0, -1, 0), // 底面
-                    new AFRAME.THREE.Vector3(0, 1, 0),  // 顶面
-                    new AFRAME.THREE.Vector3(0, 0, -1), // 前面
-                    new AFRAME.THREE.Vector3(0, 0, 1),  // 后面
-                    new AFRAME.THREE.Vector3(-1, 0, 0), // 左面
-                    new AFRAME.THREE.Vector3(1, 0, 0)   // 右面
+                    new AFRAME.THREE.Vector3(0, -1, 0), // 0: 底面
+                    new AFRAME.THREE.Vector3(0, 1, 0),  // 1: 顶面
+                    new AFRAME.THREE.Vector3(0, 0, -1), // 2: 前面
+                    new AFRAME.THREE.Vector3(0, 0, 1),  // 3: 后面
+                    new AFRAME.THREE.Vector3(-1, 0, 0), // 4: 左面
+                    new AFRAME.THREE.Vector3(1, 0, 0)   // 5: 右面
                 ];
                 
-                // 每条边相邻的两个面的索引
+                // 每条边相邻的两个面索引
                 this.edgeToFaces = [
-                    [0, 2], [0, 5], [0, 3], [0, 4], // 底面的4条边
-                    [1, 2], [1, 5], [1, 3], [1, 4], // 顶面的4条边
-                    [2, 4], [2, 5], [3, 5], [3, 4]  // 竖边的4条边
+                    [0, 2], [0, 5], [0, 3], [0, 4], // 底边 (与前后左右面相邻)
+                    [1, 2], [1, 5], [1, 3], [1, 4], // 顶边 (与前后左右面相邻)
+                    [2, 4], [2, 5], [3, 5], [3, 4]  // 竖边
                 ];
             },
             
             tick: function() {
                 const mesh = this.el.getObject3D('mesh');
                 if (!mesh) return;
-                
                 const camera = this.el.sceneEl.camera;
                 if (!camera) return;
                 
                 camera.getWorldPosition(this.cameraPos);
                 this.el.object3D.getWorldPosition(this.boxCenter);
+                // 视线向量：从物体指向相机
                 this.viewDir.subVectors(this.cameraPos, this.boxCenter).normalize();
                 
-                // 遍历所有边，判断是否为轮廓边
                 const silhouetteEdges = [];
                 const normalMatrix = new AFRAME.THREE.Matrix3().getNormalMatrix(this.el.object3D.matrixWorld);
                 
+                // 设定一个极小的阈值，处理正视时点积为 0 的情况
+                const epsilon = 0.08; 
+
                 for (let i = 0; i < this.edges.length; i++) {
-                    const [face1Idx, face2Idx] = this.edgeToFaces[i];
+                    const [f1, f2] = this.edgeToFaces[i];
                     
-                    // 变换法线到世界坐标系
-                    const normal1 = this.faceNormals[face1Idx].clone().applyMatrix3(normalMatrix).normalize();
-                    const normal2 = this.faceNormals[face2Idx].clone().applyMatrix3(normalMatrix).normalize();
+                    const n1 = this.faceNormals[f1].clone().applyMatrix3(normalMatrix).normalize();
+                    const n2 = this.faceNormals[f2].clone().applyMatrix3(normalMatrix).normalize();
                     
-                    // 判断两个面相对于视角的朝向
-                    const dot1 = normal1.dot(this.viewDir);
-                    const dot2 = normal2.dot(this.viewDir);
+                    const dot1 = n1.dot(this.viewDir);
+                    const dot2 = n2.dot(this.viewDir);
                     
-                    // 如果一个面朝向相机，另一个面背向相机，这条边就是轮廓边
-                    if (dot1 * dot2 < 0) {
+                    // 【核心判定逻辑】
+                    // 如果一个面是明显的正面（> epsilon），而另一个面不是（<= epsilon）
+                    // 那么这条边就是最外层的轮廓边
+                    if ((dot1 > epsilon && dot2 <= epsilon) || (dot2 > epsilon && dot1 <= epsilon)) {
                         silhouetteEdges.push(this.edges[i]);
                     }
                 }
                 
-                // 更新轮廓线的几何体
                 this.updateSilhouetteGeometry(silhouetteEdges);
             },
             
@@ -196,20 +185,18 @@
                 const mesh = this.el.getObject3D('mesh');
                 if (!mesh) return;
                 
-                // 查找轮廓线对象
                 let silhouetteLine = mesh.getObjectByName('silhouetteLine');
                 if (silhouetteLine) {
                     mesh.remove(silhouetteLine);
                     silhouetteLine.geometry.dispose();
                 }
                 
-                // 创建新的轮廓线几何体
                 if (silhouetteEdges.length > 0) {
                     const w = WINDOW_BOX_SIZE.w / 2;
                     const h = WINDOW_BOX_SIZE.h / 2;
                     const d = WINDOW_BOX_SIZE.d / 2;
                     
-                    // 立方体的8个顶点（局部坐标）
+                    // 【修复后的顶点坐标】
                     const vertices = [
                         [-w, -h, -d], [w, -h, -d], [w, -h, d], [-w, -h, d], // 底面 0-3
                         [-w, h, -d],  [w, h, -d],  [w, h, d],  [-w, h, d]   // 顶面 4-7
@@ -226,7 +213,8 @@
                     
                     const material = new AFRAME.THREE.LineBasicMaterial({ 
                         color: COLOR_DEFAULT_ZONE,
-                        linewidth: 2
+                        linewidth: 2,
+                        depthTest: true // 建议开启深度测试，确保AR空间遮挡正确
                     });
                     
                     silhouetteLine = new AFRAME.THREE.LineSegments(geometry, material);
