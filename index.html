@@ -1,64 +1,8 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>A-Frame AR Magic Volume - Dynamic Silhouette</title>
+    <title>A-Frame AR Magic Window - Clean Silhouette</title>
     <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
-
-    <script id="vertexShader" type="x-shader/x-vertex">
-        varying vec3 vWorldPosition; 
-        void main() {
-            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-            vWorldPosition = worldPosition.xyz;
-            gl_Position = projectionMatrix * viewMatrix * worldPosition;
-        }
-    </script>
-
-    <script id="fragmentShader" type="x-shader/x-fragment">
-        uniform vec3 uBaseColor;
-        uniform float uWindowActive; 
-        uniform mat4 uWindowInvMat; 
-        uniform vec3 uBoxDim; 
-        uniform vec3 uBoxScale; 
-        uniform vec3 uCameraWorldPos; 
-
-        varying vec3 vWorldPosition; 
-
-        vec2 rayBoxIntersection(vec3 ro, vec3 rd, vec3 halfDim) {
-            vec3 m = 1.0 / rd;
-            vec3 n = m * ro;
-            vec3 k = abs(m) * halfDim;
-            vec3 t1 = -n - k;
-            vec3 t2 = -n + k;
-            float tNear = max(max(t1.x, t1.y), t1.z);
-            float tFar = min(min(t2.x, t2.y), t2.z);
-            return vec2(tNear, tFar);
-        }
-
-        void main() {
-            vec3 finalColor = uBaseColor; 
-            float alpha = 1.0;
-
-            if (uWindowActive > 0.5) {
-                vec3 worldDir = normalize(vWorldPosition - uCameraWorldPos);
-                vec3 ro = (uWindowInvMat * vec4(uCameraWorldPos, 1.0)).xyz;
-                vec3 rd = normalize((uWindowInvMat * vec4(worldDir, 0.0)).xyz);
-                vec3 halfDim = (uBoxDim * uBoxScale) * 0.5;
-
-                vec2 hit = rayBoxIntersection(ro, rd, halfDim);
-                float tNear = hit.x;
-                float tFar = hit.y;
-
-                if (tNear < tFar && tFar > 0.0) {
-                    float distToObj = distance(uCameraWorldPos, vWorldPosition);
-                    if (distToObj < tFar) {
-                        alpha = 0.2;
-                    }
-                }
-            }
-            gl_FragColor = vec4(finalColor, alpha);
-        }
-    </script>
-
     <script>
         const COLOR_DEFAULT_ZONE = '#0000FF'; 
         const ELEMENT_SIZE = 0.1; 
@@ -71,172 +15,132 @@
             schema: { color: {type: 'color', default: '#FFFFFF'} },
             init: function() {
                 magicObjects.push(this);
-                this.cameraPos = new AFRAME.THREE.Vector3();
-                this.material = new AFRAME.THREE.ShaderMaterial({
-                    vertexShader: document.getElementById('vertexShader').textContent,
-                    fragmentShader: document.getElementById('fragmentShader').textContent,
-                    uniforms: {
-                        uBaseColor: { value: new AFRAME.THREE.Color(this.data.color) },
-                        uWindowActive: { value: isMagicWindowVisible ? 1.0 : 0.0 },
-                        uWindowInvMat: { value: new AFRAME.THREE.Matrix4() }, 
-                        uBoxDim: { value: new AFRAME.THREE.Vector3(WINDOW_BOX_SIZE.w, WINDOW_BOX_SIZE.h, WINDOW_BOX_SIZE.d) },
-                        uBoxScale: { value: new AFRAME.THREE.Vector3(1, 1, 1) },
-                        uCameraWorldPos: { value: this.cameraPos }
-                    },
-                    transparent: true,
-                    side: AFRAME.THREE.DoubleSide
-                });
-
                 const applyMat = () => {
                     const mesh = this.el.getObject3D('mesh');
-                    if (mesh) mesh.material = this.material;
+                    if (!mesh) return;
+                    mesh.material = new THREE.MeshStandardMaterial({
+                        color: new THREE.Color(this.data.color),
+                        transparent: true,
+                        opacity: 1.0,
+                        stencilWrite: true,
+                        stencilRef: 1,
+                        stencilFunc: THREE.NotEqualStencilFunc, 
+                        stencilZPass: THREE.KeepStencilOp
+                    });
                 };
                 if (this.el.getObject3D('mesh')) applyMat();
                 else this.el.addEventListener('model-loaded', applyMat);
-            },
-            tick: function() {
-                const cam = this.el.sceneEl.camera;
-                if (cam) { cam.getWorldPosition(this.cameraPos); }
             },
             remove: function() {
                 const index = magicObjects.indexOf(this);
                 if (index > -1) magicObjects.splice(index, 1);
             },
             setWindowActive: function(isActive) {
-                if (this.material) this.material.uniforms.uWindowActive.value = isActive ? 1.0 : 0.0;
-            },
-            updateWindowParams: function(invMat, scale) {
-                if (this.material) {
-                    this.material.uniforms.uWindowInvMat.value.copy(invMat);
-                    this.material.uniforms.uBoxScale.value.copy(scale);
+                const mesh = this.el.getObject3D('mesh');
+                if (mesh) {
+                    mesh.material.stencilFunc = isActive ? THREE.NotEqualStencilFunc : THREE.AlwaysStencilFunc;
                 }
             }
         });
 
-        AFRAME.registerComponent('dynamic-silhouette', {
+        AFRAME.registerComponent('magic-window-logic', {
             init: function() {
-                this.cameraPos = new AFRAME.THREE.Vector3();
-                this.boxCenter = new AFRAME.THREE.Vector3();
-                this.viewDir = new AFRAME.THREE.Vector3();
+                const geometry = new THREE.BoxGeometry(WINDOW_BOX_SIZE.w, WINDOW_BOX_SIZE.h, WINDOW_BOX_SIZE.d);
                 
-                // 12条边
-                this.edges = [
-                    [0, 1], [1, 2], [2, 3], [3, 0], // 底面
-                    [4, 5], [5, 6], [6, 7], [7, 4], // 顶面
-                    [0, 4], [1, 5], [2, 6], [3, 7]  // 竖边
-                ];
-                
-                // 面的局部法线
-                this.faceNormals = [
-                    new AFRAME.THREE.Vector3(0, -1, 0), // 0: 底面
-                    new AFRAME.THREE.Vector3(0, 1, 0),  // 1: 顶面
-                    new AFRAME.THREE.Vector3(0, 0, -1), // 2: 前面
-                    new AFRAME.THREE.Vector3(0, 0, 1),  // 3: 后面
-                    new AFRAME.THREE.Vector3(-1, 0, 0), // 4: 左面
-                    new AFRAME.THREE.Vector3(1, 0, 0)   // 5: 右面
-                ];
-                
-                // 每条边相邻的两个面索引
-                this.edgeToFaces = [
-                    [0, 2], [0, 5], [0, 3], [0, 4], // 底边 (与前后左右面相邻)
-                    [1, 2], [1, 5], [1, 3], [1, 4], // 顶边 (与前后左右面相邻)
-                    [2, 4], [2, 5], [3, 5], [3, 4]  // 竖边
-                ];
-            },
-            
-            tick: function() {
-                const mesh = this.el.getObject3D('mesh');
-                if (!mesh) return;
-                const camera = this.el.sceneEl.camera;
-                if (!camera) return;
-                
-                camera.getWorldPosition(this.cameraPos);
-                this.el.object3D.getWorldPosition(this.boxCenter);
-                // 视线向量：从物体指向相机
-                this.viewDir.subVectors(this.cameraPos, this.boxCenter).normalize();
-                
-                const silhouetteEdges = [];
-                const normalMatrix = new AFRAME.THREE.Matrix3().getNormalMatrix(this.el.object3D.matrixWorld);
-                
-                // 设定一个极小的阈值，处理正视时点积为 0 的情况
-                const epsilon = 0.08; 
+                // --- A. 遮罩层 (Mask) ---
+                const maskMat = new THREE.MeshBasicMaterial({
+                    colorWrite: false,
+                    depthWrite: false,
+                    stencilWrite: true,
+                    stencilRef: 1,
+                    stencilFunc: THREE.AlwaysStencilFunc,
+                    stencilZPass: THREE.ReplaceStencilOp
+                });
+                const maskMesh = new THREE.Mesh(geometry, maskMat);
+                maskMesh.renderOrder = 0;
 
-                for (let i = 0; i < this.edges.length; i++) {
-                    const [f1, f2] = this.edgeToFaces[i];
-                    
-                    const n1 = this.faceNormals[f1].clone().applyMatrix3(normalMatrix).normalize();
-                    const n2 = this.faceNormals[f2].clone().applyMatrix3(normalMatrix).normalize();
-                    
-                    const dot1 = n1.dot(this.viewDir);
-                    const dot2 = n2.dot(this.viewDir);
-                    
-                    // 【核心判定逻辑】
-                    // 如果一个面是明显的正面（> epsilon），而另一个面不是（<= epsilon）
-                    // 那么这条边就是最外层的轮廓边
-                    if ((dot1 > epsilon && dot2 <= epsilon) || (dot2 > epsilon && dot1 <= epsilon)) {
-                        silhouetteEdges.push(this.edges[i]);
-                    }
-                }
-                
-                this.updateSilhouetteGeometry(silhouetteEdges);
-            },
-            
-            updateSilhouetteGeometry: function(silhouetteEdges) {
-                const mesh = this.el.getObject3D('mesh');
-                if (!mesh) return;
-                
-                let silhouetteLine = mesh.getObjectByName('silhouetteLine');
-                if (silhouetteLine) {
-                    mesh.remove(silhouetteLine);
-                    silhouetteLine.geometry.dispose();
-                }
-                
-                if (silhouetteEdges.length > 0) {
-                    const w = WINDOW_BOX_SIZE.w / 2;
-                    const h = WINDOW_BOX_SIZE.h / 2;
-                    const d = WINDOW_BOX_SIZE.d / 2;
-                    
-                    // 【修复后的顶点坐标】
-                    const vertices = [
-                        [-w, -h, -d], [w, -h, -d], [w, -h, d], [-w, -h, d], // 底面 0-3
-                        [-w, h, -d],  [w, h, -d],  [w, h, d],  [-w, h, d]   // 顶面 4-7
-                    ];
-                    
-                    const positions = [];
-                    for (let edge of silhouetteEdges) {
-                        const [v1, v2] = edge;
-                        positions.push(...vertices[v1], ...vertices[v2]);
-                    }
-                    
-                    const geometry = new AFRAME.THREE.BufferGeometry();
-                    geometry.setAttribute('position', new AFRAME.THREE.Float32BufferAttribute(positions, 3));
-                    
-                    const material = new AFRAME.THREE.LineBasicMaterial({ 
+                // --- B. 2D 轮廓层 (Silhouette) ---
+                // 修改点：让轮廓线也写入 Stencil 1
+                const outlineMat = new THREE.ShaderMaterial({
+                    uniforms: {
+                        thickness: { value: 0.005 },
+                        color: { value: new THREE.Color(COLOR_DEFAULT_ZONE) }
+                    },
+                    vertexShader: `
+                        uniform float thickness;
+                        void main() {
+                            vec3 pos = position + normal * thickness;
+                            gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+                        }
+                    `,
+                    fragmentShader: `
+                        uniform vec3 color;
+                        void main() { gl_FragColor = vec4(color, 1.0); }
+                    `,
+                    side: THREE.BackSide,
+                    stencilWrite: true,
+                    stencilRef: 1,
+                    stencilFunc: THREE.NotEqualStencilFunc,
+                    stencilZPass: THREE.ReplaceStencilOp // 修改点：轮廓线也会把 Stencil 设为 1
+                });
+                const outlineMesh = new THREE.Mesh(geometry, outlineMat);
+                outlineMesh.renderOrder = 1;
+
+                // --- C. 3D 线框层 (Wireframe) ---
+                const edges = new THREE.EdgesGeometry(geometry);
+                const wireframeLine = new THREE.LineSegments(
+                    edges, 
+                    new THREE.LineBasicMaterial({ 
                         color: COLOR_DEFAULT_ZONE,
-                        linewidth: 2,
-                        depthTest: true // 建议开启深度测试，确保AR空间遮挡正确
-                    });
-                    
-                    silhouetteLine = new AFRAME.THREE.LineSegments(geometry, material);
-                    silhouetteLine.name = 'silhouetteLine';
-                    mesh.add(silhouetteLine);
-                }
-            }
-        });
+                        stencilWrite: true,
+                        stencilRef: 1,
+                        stencilFunc: THREE.AlwaysStencilFunc,
+                        stencilZPass: THREE.ReplaceStencilOp // 移动时的线框也参与挖洞
+                    })
+                );
+                wireframeLine.visible = false; 
 
-        AFRAME.registerComponent('magic-window-sync', {
-            init: function() { this.invMat = new AFRAME.THREE.Matrix4(); },
+                this.el.setObject3D('mask', maskMesh);
+                this.el.setObject3D('outline', outlineMesh);
+                this.el.setObject3D('wireframe', wireframeLine);
+
+                this.lastPos = new THREE.Vector3();
+                this.el.object3D.getWorldPosition(this.lastPos);
+                this.isMoving = false;
+                this.stopTimeout = null;
+
+                this.el.addEventListener('grabstart', () => this.setMovingMode(true));
+                this.el.addEventListener('grabend', () => this.setMovingMode(false));
+            },
+
+            setMovingMode: function(moving) {
+                const outline = this.el.getObject3D('outline');
+                const wireframe = this.el.getObject3D('wireframe');
+                if (outline && wireframe) {
+                    outline.visible = !moving;
+                    wireframe.visible = moving;
+                }
+            },
+
             tick: function() {
-                if (!isMagicWindowVisible || !this.el.object3D) return;
-                this.el.object3D.updateMatrixWorld();
-                this.invMat.copy(this.el.object3D.matrixWorld).invert();
-                const scale = this.el.object3D.scale;
-                for (let i = 0; i < magicObjects.length; i++) {
-                    magicObjects[i].updateWindowParams(this.invMat, scale);
+                const currentPos = new THREE.Vector3();
+                this.el.object3D.getWorldPosition(currentPos);
+                if (this.lastPos.distanceTo(currentPos) > 0.002) {
+                    if (!this.isMoving) {
+                        this.isMoving = true;
+                        this.setMovingMode(true);
+                    }
+                    clearTimeout(this.stopTimeout);
+                    this.stopTimeout = setTimeout(() => {
+                        this.isMoving = false;
+                        this.setMovingMode(false);
+                    }, 150); 
                 }
+                this.lastPos.copy(currentPos);
             }
         });
 
+        // 交互控制部分保持不变
         AFRAME.registerComponent('double-pinch-creator-deleter', {
           init: function () {
             this.lastPinchTime = 0;
@@ -296,7 +200,7 @@
             showStatusText: function(message) {
                 const textEl = document.createElement('a-text');
                 textEl.setAttribute('value', message); textEl.setAttribute('position', '0 2.0 -1.5'); 
-                textEl.setAttribute('align', 'center'); textEl.setAttribute('look-at', '#mainCamera'); 
+                textEl.setAttribute('align', 'center'); 
                 this.sceneEl.appendChild(textEl);
                 setTimeout(() => { if (textEl.parentNode) textEl.parentNode.removeChild(textEl); }, 2000);
             },
@@ -314,28 +218,10 @@
                     this.windowEl.setAttribute('position', pos); 
                     this.windowEl.setAttribute('grabbable', '');
                     this.windowEl.setAttribute('class', 'magic-window');
-                    this.windowEl.setAttribute('magic-window-sync', '');
-                    this.windowEl.setAttribute('dynamic-silhouette', ''); // 添加动态轮廓组件
-                    
+                    this.windowEl.setAttribute('magic-window-logic', '');
                     this.windowEl.addEventListener('loaded', () => {
-                        const boxGeometry = new AFRAME.THREE.BoxGeometry(
-                            WINDOW_BOX_SIZE.w, 
-                            WINDOW_BOX_SIZE.h, 
-                            WINDOW_BOX_SIZE.d
-                        );
-                        
-                        const boxMaterial = new AFRAME.THREE.MeshBasicMaterial({
-                            color: COLOR_DEFAULT_ZONE,
-                            transparent: true,
-                            opacity: 0.05,
-                            side: AFRAME.THREE.DoubleSide
-                        });
-                        const boxMesh = new AFRAME.THREE.Mesh(boxGeometry, boxMaterial);
-                        
-                        this.windowEl.setObject3D('mesh', boxMesh);
                         this.windowEl.object3D.lookAt(camEl.object3D.getWorldPosition(new AFRAME.THREE.Vector3()));
                     });
-                    
                     this.sceneEl.appendChild(this.windowEl); 
                     isMagicWindowVisible = true;
                     this.showStatusText("Magic View Created");
@@ -347,11 +233,10 @@
     <style>body { margin: 0; overflow: hidden; }</style>
 </head>
 <body>
-    <a-scene xr-mode-ui="XRMode: ar"> 
+    <a-scene xr-mode-ui="XRMode: ar" renderer="stencil: true; colorManagement: true;"> 
         <a-camera id="mainCamera" position="0 1.6 0"></a-camera>
         <a-box position="0 1.2 -0.2" rotation="0 45 0" width="0.1" height="0.1" depth="0.1" apply-magic-shader="color: #FF0000" grabbable></a-box>
         <a-sphere position="0 1.2 -2.0" radius="0.1" apply-magic-shader="color: #00FF00" grabbable></a-sphere>
-        
         <a-entity id="leftHand" hand-tracking-controls="hand: left" double-pinch-creator-deleter magic-window-creator></a-entity>
         <a-entity id="rightHand" hand-tracking-controls="hand: right" hand-tracking-grab-controls="hand: right; hoverEnabled: true;"></a-entity>
     </a-scene>
