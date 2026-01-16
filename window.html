@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>A-Frame AR Magic Window - Full Rotation Support</title>
+    <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+
+    <script id="vertexShader" type="x-shader/x-vertex">
+        varying vec3 vWorldPosition; 
+        void main() {
+            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+            vWorldPosition = worldPosition.xyz;
+            gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+    </script>
+
+    <script id="fragmentShader" type="x-shader/x-fragment">
+        uniform vec3 uBaseColor;
+        uniform float uWindowActive; 
+        uniform mat4 uWindowInvMat; 
+        uniform vec2 uWindowScale; 
+        uniform vec3 uCameraWorldPos; 
+
+        varying vec3 vWorldPosition; 
+
+        void main() {
+            vec3 finalColor = uBaseColor; 
+            float alpha = 1.0;
+
+            if (uWindowActive > 0.5) {
+                vec3 rayDir = normalize(vWorldPosition - uCameraWorldPos);
+                vec3 ro = (uWindowInvMat * vec4(uCameraWorldPos, 1.0)).xyz;
+                vec3 rd = normalize((uWindowInvMat * vec4(rayDir, 0.0)).xyz);
+                
+                if (abs(rd.z) > 0.0001) {
+                    float t = -ro.z / rd.z;
+                    float distToObj = distance(uCameraWorldPos, vWorldPosition);
+                    float distToWindow = t;
+
+                    if (t > 0.0 && distToObj > distToWindow) {
+                        vec3 intersectPos = ro + rd * t;
+                        float halfW = (0.4 * uWindowScale.x) * 0.5;
+                        float halfH = (0.3 * uWindowScale.y) * 0.5;
+
+                        if (abs(intersectPos.x) <= halfW && abs(intersectPos.y) <= halfH) {
+                            alpha = 0.2;
+                        }
+                    }
+                }
+            }
+            gl_FragColor = vec4(finalColor, alpha);
+        }
+    </script>
+
+    <script>
+        const COLOR_DEFAULT_ZONE = '#0000FF'; 
+        const ELEMENT_SIZE = 0.1; 
+        let isMagicWindowVisible = false;
+        let magicObjects = [];
+
+        AFRAME.registerComponent('apply-magic-shader', {
+            schema: { color: {type: 'color', default: '#FFFFFF'} },
+            init: function() {
+                magicObjects.push(this);
+                this.cameraPos = new AFRAME.THREE.Vector3();
+                this.material = new AFRAME.THREE.ShaderMaterial({
+                    vertexShader: document.getElementById('vertexShader').textContent,
+                    fragmentShader: document.getElementById('fragmentShader').textContent,
+                    uniforms: {
+                        uBaseColor: { value: new AFRAME.THREE.Color(this.data.color) },
+                        uWindowActive: { value: isMagicWindowVisible ? 1.0 : 0.0 },
+                        uWindowInvMat: { value: new AFRAME.THREE.Matrix4() }, 
+                        uWindowScale: { value: new AFRAME.THREE.Vector2(1, 1) },
+                        uCameraWorldPos: { value: this.cameraPos }
+                    },
+                    transparent: true,
+                    side: AFRAME.THREE.DoubleSide
+                });
+
+                const applyMat = () => {
+                    const mesh = this.el.getObject3D('mesh');
+                    if (mesh) mesh.material = this.material;
+                };
+                if (this.el.getObject3D('mesh')) applyMat();
+                else this.el.addEventListener('model-loaded', applyMat);
+            },
+            tick: function() {
+                const cam = this.el.sceneEl.camera;
+                if (cam) { cam.getWorldPosition(this.cameraPos); }
+            },
+            remove: function() {
+                const index = magicObjects.indexOf(this);
+                if (index > -1) magicObjects.splice(index, 1);
+            },
+            setWindowActive: function(isActive) {
+                if (this.material) this.material.uniforms.uWindowActive.value = isActive ? 1.0 : 0.0;
+            },
+            updateWindowParams: function(invMat, scale) {
+                if (this.material) {
+                    this.material.uniforms.uWindowInvMat.value.copy(invMat);
+                    this.material.uniforms.uWindowScale.value.set(scale.x, scale.y);
+                }
+            }
+        });
+
+        AFRAME.registerComponent('magic-window-sync', {
+            init: function() { this.invMat = new AFRAME.THREE.Matrix4(); },
+            tick: function() {
+                if (!isMagicWindowVisible || !this.el.object3D) return;
+                this.el.object3D.updateMatrixWorld();
+                this.invMat.copy(this.el.object3D.matrixWorld).invert();
+                const scale = this.el.object3D.scale;
+                for (let i = 0; i < magicObjects.length; i++) {
+                    magicObjects[i].updateWindowParams(this.invMat, scale);
+                }
+            }
+        });
+
+        AFRAME.registerComponent('double-pinch-creator-deleter', {
+          init: function () {
+            this.lastPinchTime = 0;
+            this.sceneEl = document.querySelector('a-scene');
+            this.el.addEventListener('pinchstarted', (evt) => {
+              const currentTime = Date.now();
+              if (currentTime - this.lastPinchTime < 300) {
+                this.handleDoublePinch(evt.detail.position);
+                this.lastPinchTime = 0;
+              } else { this.lastPinchTime = currentTime; }
+            });
+          },
+          handleDoublePinch: function (pinchPos) {
+            const rightHand = document.getElementById('rightHand').components['hand-tracking-grab-controls'];
+            const grabbedEl = rightHand ? rightHand.grabbedEl : null;
+            if (grabbedEl && grabbedEl.hasAttribute('grabbable') && !grabbedEl.classList.contains('magic-window')) {
+                if (grabbedEl.parentNode) grabbedEl.parentNode.removeChild(grabbedEl);
+            } else { this.createRandomElement(pinchPos); }
+          },
+          createRandomElement: function (pos) {
+            const el = document.createElement(Math.random() < 0.5 ? 'a-box' : 'a-sphere');
+            const color = `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`;
+            if (el.tagName === 'A-BOX') el.setAttribute('depth', ELEMENT_SIZE);
+            else el.setAttribute('radius', ELEMENT_SIZE/2);
+            el.setAttribute('width', ELEMENT_SIZE); el.setAttribute('height', ELEMENT_SIZE);
+            el.setAttribute('apply-magic-shader', `color: ${color}`);
+            el.setAttribute('grabbable', ''); 
+            el.setAttribute('position', `${pos.x} ${pos.y} ${pos.z}`);
+            this.sceneEl.appendChild(el);
+          }
+        });
+
+        AFRAME.registerComponent('magic-window-creator', {
+            init: function () {
+                this.sceneEl = document.querySelector('a-scene'); 
+                this.leftHand = this.el;
+                this.rightHand = document.getElementById('rightHand');
+                this.isLeftPinching = false; this.isRightPinching = false;
+                this.isCreating = false; this.windowEl = null;
+
+                const start = () => { this.checkStart(); };
+                const end = () => { this.isLeftPinching = false; this.isRightPinching = false; clearTimeout(this.timeout); this.isCreating = false; };
+                
+                this.leftHand.addEventListener('pinchstarted', () => { this.isLeftPinching = true; start(); });
+                this.leftHand.addEventListener('pinchended', end);
+                this.rightHand.addEventListener('pinchstarted', () => { this.isRightPinching = true; start(); });
+                this.rightHand.addEventListener('pinchended', end);
+            },
+            checkStart: function() {
+                if (this.isLeftPinching && this.isRightPinching && !this.isCreating) {
+                    this.isCreating = true;
+                    this.timeout = setTimeout(() => {
+                        if (this.isLeftPinching && this.isRightPinching) this.toggleMagicWindow();
+                    }, 3000);
+                }
+            },
+            showStatusText: function(message) {
+                const textEl = document.createElement('a-text');
+                textEl.setAttribute('value', message); textEl.setAttribute('position', '0 2.0 -1.5'); 
+                textEl.setAttribute('align', 'center'); 
+                // 注意：文字提示可以保留 look-at 以便阅读，但窗口主体必须移除
+                textEl.setAttribute('look-at', '#mainCamera'); 
+                this.sceneEl.appendChild(textEl);
+                setTimeout(() => { if (textEl.parentNode) textEl.parentNode.removeChild(textEl); }, 2000);
+            },
+            toggleMagicWindow: function() {
+                if (isMagicWindowVisible) {
+                    if (this.windowEl) this.windowEl.parentNode.removeChild(this.windowEl);
+                    isMagicWindowVisible = false;
+                    this.showStatusText("Magic Window Deleted");
+                } else {
+                    const camEl = document.getElementById('mainCamera');
+                    const pos = new AFRAME.THREE.Vector3(0, 0, -0.5);
+                    pos.applyMatrix4(camEl.object3D.matrixWorld);
+
+                    this.windowEl = document.createElement('a-entity');
+                    this.windowEl.setAttribute('geometry', 'primitive: plane; width: 0.4; height: 0.3;'); 
+                    this.windowEl.setAttribute('position', pos); 
+                    this.windowEl.setAttribute('grabbable', '');
+                    this.windowEl.setAttribute('class', 'magic-window');
+                    
+                    // --- 修改点：移除 look-at，改为在初始化时手动设置一次朝向 ---
+                    this.windowEl.addEventListener('loaded', () => {
+                        this.windowEl.object3D.lookAt(camEl.object3D.getWorldPosition(new AFRAME.THREE.Vector3()));
+                    });
+                    
+                    this.windowEl.setAttribute('magic-window-sync', '');
+                    this.windowEl.setAttribute('material', `color: ${COLOR_DEFAULT_ZONE}; wireframe: true; transparent: true; opacity: 0.3; side: double;`); 
+                    this.sceneEl.appendChild(this.windowEl); 
+                    isMagicWindowVisible = true;
+                    this.showStatusText("Magic Window Created");
+                }
+                magicObjects.forEach(cmp => cmp.setWindowActive(isMagicWindowVisible));
+            }
+        });
+    </script>
+    <style>body { margin: 0; overflow: hidden; }</style>
+</head>
+<body>
+    <a-scene xr-mode-ui="XRMode: ar"> 
+        <a-camera id="mainCamera" position="0 1.6 0"></a-camera>
+        <a-box position="0 1.2 -0.5" rotation="0 45 0" width="0.15" height="0.15" depth="0.15" apply-magic-shader="color: #FF0000" grabbable></a-box>
+        <a-entity id="leftHand" hand-tracking-controls="hand: left" double-pinch-creator-deleter magic-window-creator></a-entity>
+        <a-entity id="rightHand" hand-tracking-controls="hand: right" hand-tracking-grab-controls="hand: right; hoverEnabled: true;"></a-entity>
+    </a-scene>
+</body>
+</html>
