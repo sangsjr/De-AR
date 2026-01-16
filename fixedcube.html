@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>A-Frame AR Magic Volume - Dynamic Silhouette</title>
+    <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+
+    <script id="vertexShader" type="x-shader/x-vertex">
+        varying vec3 vWorldPosition; 
+        void main() {
+            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+            vWorldPosition = worldPosition.xyz;
+            gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+    </script>
+
+    <script id="fragmentShader" type="x-shader/x-fragment">
+        uniform vec3 uBaseColor;
+        uniform float uWindowActive; 
+        uniform mat4 uWindowInvMat; 
+        uniform vec3 uBoxDim; 
+        uniform vec3 uBoxScale; 
+        uniform vec3 uCameraWorldPos; 
+
+        varying vec3 vWorldPosition; 
+
+        vec2 rayBoxIntersection(vec3 ro, vec3 rd, vec3 halfDim) {
+            vec3 m = 1.0 / rd;
+            vec3 n = m * ro;
+            vec3 k = abs(m) * halfDim;
+            vec3 t1 = -n - k;
+            vec3 t2 = -n + k;
+            float tNear = max(max(t1.x, t1.y), t1.z);
+            float tFar = min(min(t2.x, t2.y), t2.z);
+            return vec2(tNear, tFar);
+        }
+
+        void main() {
+            vec3 finalColor = uBaseColor; 
+            float alpha = 1.0;
+
+            if (uWindowActive > 0.5) {
+                vec3 worldDir = normalize(vWorldPosition - uCameraWorldPos);
+                vec3 ro = (uWindowInvMat * vec4(uCameraWorldPos, 1.0)).xyz;
+                vec3 rd = normalize((uWindowInvMat * vec4(worldDir, 0.0)).xyz);
+                vec3 halfDim = (uBoxDim * uBoxScale) * 0.5;
+
+                vec2 hit = rayBoxIntersection(ro, rd, halfDim);
+                float tNear = hit.x;
+                float tFar = hit.y;
+
+                if (tNear < tFar && tFar > 0.0) {
+                    float distToObj = distance(uCameraWorldPos, vWorldPosition);
+                    if (distToObj < tFar) {
+                        alpha = 0.0;
+                    }
+                }
+            }
+            gl_FragColor = vec4(finalColor, alpha);
+        }
+    </script>
+
+    <script>
+        const COLOR_DEFAULT_ZONE = '#0000FF'; 
+        const ELEMENT_SIZE = 0.1; 
+        const WINDOW_BOX_SIZE = { w: 0.4, h: 0.3, d: 0.4 }; 
+
+        let isMagicWindowVisible = false;
+        let magicObjects = [];
+
+        AFRAME.registerComponent('apply-magic-shader', {
+            schema: { color: {type: 'color', default: '#FFFFFF'} },
+            init: function() {
+                magicObjects.push(this);
+                this.cameraPos = new AFRAME.THREE.Vector3();
+                this.material = new AFRAME.THREE.ShaderMaterial({
+                    vertexShader: document.getElementById('vertexShader').textContent,
+                    fragmentShader: document.getElementById('fragmentShader').textContent,
+                    uniforms: {
+                        uBaseColor: { value: new AFRAME.THREE.Color(this.data.color) },
+                        uWindowActive: { value: isMagicWindowVisible ? 1.0 : 0.0 },
+                        uWindowInvMat: { value: new AFRAME.THREE.Matrix4() }, 
+                        uBoxDim: { value: new AFRAME.THREE.Vector3(WINDOW_BOX_SIZE.w, WINDOW_BOX_SIZE.h, WINDOW_BOX_SIZE.d) },
+                        uBoxScale: { value: new AFRAME.THREE.Vector3(1, 1, 1) },
+                        uCameraWorldPos: { value: this.cameraPos }
+                    },
+                    transparent: true,
+                    side: AFRAME.THREE.DoubleSide
+                });
+
+                const applyMat = () => {
+                    const mesh = this.el.getObject3D('mesh');
+                    if (mesh) mesh.material = this.material;
+                };
+                if (this.el.getObject3D('mesh')) applyMat();
+                else this.el.addEventListener('model-loaded', applyMat);
+            },
+            tick: function() {
+                const cam = this.el.sceneEl.camera;
+                if (cam) { cam.getWorldPosition(this.cameraPos); }
+            },
+            remove: function() {
+                const index = magicObjects.indexOf(this);
+                if (index > -1) magicObjects.splice(index, 1);
+            },
+            setWindowActive: function(isActive) {
+                if (this.material) this.material.uniforms.uWindowActive.value = isActive ? 1.0 : 0.0;
+            },
+            updateWindowParams: function(invMat, scale) {
+                if (this.material) {
+                    this.material.uniforms.uWindowInvMat.value.copy(invMat);
+                    this.material.uniforms.uBoxScale.value.copy(scale);
+                }
+            }
+        });
+
+AFRAME.registerComponent('dynamic-silhouette', {
+            init: function() {
+                this.cameraPos = new AFRAME.THREE.Vector3();
+                this.boxCenter = new AFRAME.THREE.Vector3();
+                this.viewDir = new AFRAME.THREE.Vector3();
+                
+                // --- 新增：用于检测移动的状态变量 ---
+                this.lastWorldPosition = new AFRAME.THREE.Vector3();
+                this.lastWorldQuaternion = new AFRAME.THREE.Quaternion();
+                this.isMoving = false;
+                // ----------------------------------
+
+                this.edges = [
+                    [0, 1], [1, 2], [2, 3], [3, 0], 
+                    [4, 5], [5, 6], [6, 7], [7, 4], 
+                    [0, 4], [1, 5], [2, 6], [3, 7]  
+                ];
+                
+                this.faceNormals = [
+                    new AFRAME.THREE.Vector3(0, -1, 0), 
+                    new AFRAME.THREE.Vector3(0, 1, 0),  
+                    new AFRAME.THREE.Vector3(0, 0, -1), 
+                    new AFRAME.THREE.Vector3(0, 0, 1),  
+                    new AFRAME.THREE.Vector3(-1, 0, 0), 
+                    new AFRAME.THREE.Vector3(1, 0, 0)   
+                ];
+                
+                this.edgeToFaces = [
+                    [0, 2], [0, 5], [0, 3], [0, 4], 
+                    [1, 2], [1, 5], [1, 3], [1, 4], 
+                    [2, 4], [2, 5], [3, 5], [3, 4]  
+                ];
+            },
+            
+            tick: function() {
+                const mesh = this.el.getObject3D('mesh');
+                if (!mesh) return;
+                const camera = this.el.sceneEl.camera;
+                if (!camera) return;
+                
+                // --- 检测移动逻辑 ---
+                const currentWorldPos = new AFRAME.THREE.Vector3();
+                const currentWorldQuat = new AFRAME.THREE.Quaternion();
+                this.el.object3D.getWorldPosition(currentWorldPos);
+                this.el.object3D.getWorldQuaternion(currentWorldQuat);
+
+                // 判断位置或旋转是否有明显变化 (阈值可根据灵敏度微调)
+                const positionChanged = currentWorldPos.distanceTo(this.lastWorldPosition) > 0.001;
+                const rotationChanged = currentWorldQuat.angleTo(this.lastWorldQuaternion) > 0.001;
+
+                this.isMoving = positionChanged || rotationChanged;
+
+                // 更新上一次的状态
+                this.lastWorldPosition.copy(currentWorldPos);
+                this.lastWorldQuaternion.copy(currentWorldQuat);
+                // --------------------
+
+                camera.getWorldPosition(this.cameraPos);
+                this.boxCenter.copy(currentWorldPos);
+                this.viewDir.subVectors(this.cameraPos, this.boxCenter).normalize();
+                
+                const silhouetteEdges = [];
+                const normalMatrix = new AFRAME.THREE.Matrix3().getNormalMatrix(this.el.object3D.matrixWorld);
+                const epsilon = 0.08; //设置微小偏差量（用于计算法线与视图方向的点积，判断是否为轮廓边）
+
+                for (let i = 0; i < this.edges.length; i++) {
+                    // 如果正在移动，强制显示所有边
+                    if (this.isMoving) {
+                        silhouetteEdges.push(this.edges[i]);
+                        continue;
+                    }
+
+                    // 静止时的轮廓判定逻辑
+                    const [f1, f2] = this.edgeToFaces[i];
+                    const n1 = this.faceNormals[f1].clone().applyMatrix3(normalMatrix).normalize();
+                    const n2 = this.faceNormals[f2].clone().applyMatrix3(normalMatrix).normalize();
+                    const dot1 = n1.dot(this.viewDir);
+                    const dot2 = n2.dot(this.viewDir);
+                    
+                    if ((dot1 > epsilon && dot2 <= epsilon) || (dot2 > epsilon && dot1 <= epsilon)) {
+                        silhouetteEdges.push(this.edges[i]);
+                    }
+                }
+                
+                this.updateSilhouetteGeometry(silhouetteEdges);
+            },
+            
+            updateSilhouetteGeometry: function(silhouetteEdges) {
+                const mesh = this.el.getObject3D('mesh');
+                if (!mesh) return;
+                
+                let silhouetteLine = mesh.getObjectByName('silhouetteLine');
+                if (silhouetteLine) {
+                    mesh.remove(silhouetteLine);
+                    silhouetteLine.geometry.dispose();
+                }
+                
+                if (silhouetteEdges.length > 0) {
+                    const w = WINDOW_BOX_SIZE.w / 2;
+                    const h = WINDOW_BOX_SIZE.h / 2;
+                    const d = WINDOW_BOX_SIZE.d / 2;
+                    
+                    const vertices = [
+                        [-w, -h, -d], [w, -h, -d], [w, -h, d], [-w, -h, d], 
+                        [-w, h, -d],  [w, h, -d],  [w, h, d],  [-w, h, d]   
+                    ];
+                    
+                    const positions = [];
+                    for (let edge of silhouetteEdges) {
+                        const [v1, v2] = edge;
+                        positions.push(...vertices[v1], ...vertices[v2]);
+                    }
+                    
+                    const geometry = new AFRAME.THREE.BufferGeometry();
+                    geometry.setAttribute('position', new AFRAME.THREE.Float32BufferAttribute(positions, 3));
+                    
+                    const material = new AFRAME.THREE.LineBasicMaterial({ 
+                        color: COLOR_DEFAULT_ZONE,
+                        linewidth: 2,
+                        depthTest: true 
+                    });
+                    
+                    silhouetteLine = new AFRAME.THREE.LineSegments(geometry, material);
+                    silhouetteLine.name = 'silhouetteLine';
+                    mesh.add(silhouetteLine);
+                }
+            }
+        });
+
+        AFRAME.registerComponent('magic-window-sync', {
+            init: function() { this.invMat = new AFRAME.THREE.Matrix4(); },
+            tick: function() {
+                if (!isMagicWindowVisible || !this.el.object3D) return;
+                this.el.object3D.updateMatrixWorld();
+                this.invMat.copy(this.el.object3D.matrixWorld).invert();
+                const scale = this.el.object3D.scale;
+                for (let i = 0; i < magicObjects.length; i++) {
+                    magicObjects[i].updateWindowParams(this.invMat, scale);
+                }
+            }
+        });
+
+        AFRAME.registerComponent('double-pinch-creator-deleter', {
+          init: function () {
+            this.lastPinchTime = 0;
+            this.sceneEl = document.querySelector('a-scene');
+            this.el.addEventListener('pinchstarted', (evt) => {
+              const currentTime = Date.now();
+              if (currentTime - this.lastPinchTime < 300) {
+                this.handleDoublePinch(evt.detail.position);
+                this.lastPinchTime = 0;
+              } else { this.lastPinchTime = currentTime; }
+            });
+          },
+          handleDoublePinch: function (pinchPos) {
+            const rightHand = document.getElementById('rightHand').components['hand-tracking-grab-controls'];
+            const grabbedEl = rightHand ? rightHand.grabbedEl : null;
+            if (grabbedEl && grabbedEl.hasAttribute('grabbable') && !grabbedEl.classList.contains('magic-window')) {
+                if (grabbedEl.parentNode) grabbedEl.parentNode.removeChild(grabbedEl);
+            } else { this.createRandomElement(pinchPos); }
+          },
+          createRandomElement: function (pos) {
+            const el = document.createElement(Math.random() < 0.5 ? 'a-box' : 'a-sphere');
+            const color = `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`;
+            if (el.tagName === 'A-BOX') el.setAttribute('depth', ELEMENT_SIZE);
+            else el.setAttribute('radius', ELEMENT_SIZE/2);
+            el.setAttribute('width', ELEMENT_SIZE); el.setAttribute('height', ELEMENT_SIZE);
+            el.setAttribute('apply-magic-shader', `color: ${color}`);
+            el.setAttribute('grabbable', ''); 
+            el.setAttribute('position', `${pos.x} ${pos.y} ${pos.z}`);
+            this.sceneEl.appendChild(el);
+          }
+        });
+
+        AFRAME.registerComponent('magic-window-creator', {
+            init: function () {
+                this.sceneEl = document.querySelector('a-scene'); 
+                this.leftHand = this.el;
+                this.rightHand = document.getElementById('rightHand');
+                this.isLeftPinching = false; this.isRightPinching = false;
+                this.isCreating = false; this.windowEl = null;
+
+                const start = () => { this.checkStart(); };
+                const end = () => { this.isLeftPinching = false; this.isRightPinching = false; clearTimeout(this.timeout); this.isCreating = false; };
+                
+                this.leftHand.addEventListener('pinchstarted', () => { this.isLeftPinching = true; start(); });
+                this.leftHand.addEventListener('pinchended', end);
+                this.rightHand.addEventListener('pinchstarted', () => { this.isRightPinching = true; start(); });
+                this.rightHand.addEventListener('pinchended', end);
+            },
+            checkStart: function() {
+                if (this.isLeftPinching && this.isRightPinching && !this.isCreating) {
+                    this.isCreating = true;
+                    this.timeout = setTimeout(() => {
+                        if (this.isLeftPinching && this.isRightPinching) this.toggleMagicWindow();
+                    }, 3000);
+                }
+            },
+            showStatusText: function(message) {
+                const textEl = document.createElement('a-text');
+                textEl.setAttribute('value', message); textEl.setAttribute('position', '0 2.0 -1.5'); 
+                textEl.setAttribute('align', 'center'); textEl.setAttribute('look-at', '#mainCamera'); 
+                this.sceneEl.appendChild(textEl);
+                setTimeout(() => { if (textEl.parentNode) textEl.parentNode.removeChild(textEl); }, 2000);
+            },
+            toggleMagicWindow: function() {
+                if (isMagicWindowVisible) {
+                    if (this.windowEl) this.windowEl.parentNode.removeChild(this.windowEl);
+                    isMagicWindowVisible = false;
+                    this.showStatusText("Magic View Deleted");
+                } else {
+                    const camEl = document.getElementById('mainCamera');
+                    const pos = new AFRAME.THREE.Vector3(0, 0, -0.5);
+                    pos.applyMatrix4(camEl.object3D.matrixWorld);
+
+                    this.windowEl = document.createElement('a-entity');
+                    this.windowEl.setAttribute('position', pos); 
+                    this.windowEl.setAttribute('grabbable', '');
+                    this.windowEl.setAttribute('class', 'magic-window');
+                    this.windowEl.setAttribute('magic-window-sync', '');
+                    this.windowEl.setAttribute('dynamic-silhouette', ''); // 添加动态轮廓组件
+                    
+                    this.windowEl.addEventListener('loaded', () => {
+                        const boxGeometry = new AFRAME.THREE.BoxGeometry(
+                            WINDOW_BOX_SIZE.w, 
+                            WINDOW_BOX_SIZE.h, 
+                            WINDOW_BOX_SIZE.d
+                        );
+                        
+                        const boxMaterial = new AFRAME.THREE.MeshBasicMaterial({
+                            color: COLOR_DEFAULT_ZONE,
+                            transparent: true,
+                            opacity: 0.0,
+                            side: AFRAME.THREE.DoubleSide
+                        });
+                        const boxMesh = new AFRAME.THREE.Mesh(boxGeometry, boxMaterial);
+                        
+                        this.windowEl.setObject3D('mesh', boxMesh);
+                        this.windowEl.object3D.lookAt(camEl.object3D.getWorldPosition(new AFRAME.THREE.Vector3()));
+                    });
+                    
+                    this.sceneEl.appendChild(this.windowEl); 
+                    isMagicWindowVisible = true;
+                    this.showStatusText("Magic View Created");
+                }
+                magicObjects.forEach(cmp => cmp.setWindowActive(isMagicWindowVisible));
+            }
+        });
+    </script>
+    <style>body { margin: 0; overflow: hidden; }</style>
+</head>
+<body>
+    <a-scene xr-mode-ui="XRMode: ar"> 
+        <a-camera id="mainCamera" position="0 1.6 0"></a-camera>
+        <a-box position="0 1.2 -0.2" rotation="0 45 0" width="0.1" height="0.1" depth="0.1" apply-magic-shader="color: #FF0000" grabbable></a-box>
+      
+        <a-entity id="leftHand" hand-tracking-controls="hand: left" double-pinch-creator-deleter magic-window-creator></a-entity>
+        <a-entity id="rightHand" hand-tracking-controls="hand: right" hand-tracking-grab-controls="hand: right; hoverEnabled: true;"></a-entity>
+    </a-scene>
+</body>
+</html>
