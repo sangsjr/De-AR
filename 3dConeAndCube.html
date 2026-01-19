@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>A-Frame AR - Dual Shape Magic Windows (No Conflict)</title>
+    <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+    <script>
+        const COLOR_DEFAULT_ZONE = '#0000FF'; 
+        const ELEMENT_SIZE = 0.1; 
+        const WINDOW_BOX_SIZE = { w: 0.4, h: 0.3, d: 0.4 }; 
+
+        let magicObjects = [];
+
+        // 1. 被遮挡物组件 (保持不变)
+        AFRAME.registerComponent('apply-magic-shader', {
+            schema: { color: {type: 'color', default: '#FFFFFF'} },
+            init: function() {
+                magicObjects.push(this);
+                const applyMat = () => {
+                    const mesh = this.el.getObject3D('mesh');
+                    if (!mesh) return;
+                    mesh.material = new THREE.MeshStandardMaterial({
+                        color: new THREE.Color(this.data.color),
+                        transparent: true,
+                        opacity: 1.0,
+                        stencilWrite: true,
+                        stencilRef: 1,
+                        stencilFunc: THREE.NotEqualStencilFunc,
+                        stencilZPass: THREE.KeepStencilOp
+                    });
+                };
+                if (this.el.getObject3D('mesh')) applyMat();
+                else this.el.addEventListener('model-loaded', applyMat);
+            },
+            remove: function() {
+                const index = magicObjects.indexOf(this);
+                if (index > -1) magicObjects.splice(index, 1);
+            },
+            updateStencil: function(isActive) {
+                const mesh = this.el.getObject3D('mesh');
+                if (mesh) {
+                    mesh.material.stencilFunc = isActive ? THREE.NotEqualStencilFunc : THREE.AlwaysStencilFunc;
+                }
+            }
+        });
+
+        // 2. 魔法窗口逻辑 (保持不变)
+        AFRAME.registerComponent('magic-window-logic', {
+            schema: { type: { type: 'string', default: 'box' } },
+            init: function() {
+                let geometry;
+                if (this.data.type === 'cone') {
+                    geometry = new THREE.ConeGeometry(0.2, 0.4, 32);
+                } else {
+                    geometry = new THREE.BoxGeometry(WINDOW_BOX_SIZE.w, WINDOW_BOX_SIZE.h, WINDOW_BOX_SIZE.d);
+                }
+                const maskMat = new THREE.MeshBasicMaterial({
+                    colorWrite: false, depthWrite: false, stencilWrite: true,
+                    stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp
+                });
+                const maskMesh = new THREE.Mesh(geometry, maskMat);
+                maskMesh.renderOrder = 0;
+
+                const outlineMat = new THREE.ShaderMaterial({
+                    uniforms: { thickness: { value: 0.005 }, color: { value: new THREE.Color(COLOR_DEFAULT_ZONE) } },
+                    vertexShader: `uniform float thickness; void main() { vec3 pos = position + normal * thickness; gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0); }`,
+                    fragmentShader: `uniform vec3 color; void main() { gl_FragColor = vec4(color, 1.0); }`,
+                    side: THREE.BackSide, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.NotEqualStencilFunc, stencilZPass: THREE.ReplaceStencilOp
+                });
+                const outlineMesh = new THREE.Mesh(geometry, outlineMat);
+                outlineMesh.renderOrder = 1;
+
+                const edges = new THREE.EdgesGeometry(geometry);
+                const wireframeLine = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: COLOR_DEFAULT_ZONE, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp }));
+                wireframeLine.visible = false; 
+
+                this.el.setObject3D('mask', maskMesh);
+                this.el.setObject3D('outline', outlineMesh);
+                this.el.setObject3D('wireframe', wireframeLine);
+
+                this.lastPos = new THREE.Vector3();
+                this.el.object3D.getWorldPosition(this.lastPos);
+                this.isMoving = false;
+                this.stopTimeout = null;
+
+                this.el.addEventListener('grabstart', () => this.setMovingMode(true));
+                this.el.addEventListener('grabend', () => this.setMovingMode(false));
+            },
+            setMovingMode: function(moving) {
+                const outline = this.el.getObject3D('outline');
+                const wireframe = this.el.getObject3D('wireframe');
+                if (outline && wireframe) {
+                    outline.visible = !moving;
+                    wireframe.visible = moving;
+                }
+            },
+            tick: function() {
+                const currentPos = new THREE.Vector3();
+                this.el.object3D.getWorldPosition(currentPos);
+                if (this.lastPos.distanceTo(currentPos) > 0.002) {
+                    if (!this.isMoving) { this.isMoving = true; this.setMovingMode(true); }
+                    clearTimeout(this.stopTimeout);
+                    this.stopTimeout = setTimeout(() => { this.isMoving = false; this.setMovingMode(false); }, 150); 
+                }
+                this.lastPos.copy(currentPos);
+            }
+        });
+
+        // 3. 改进后的魔法窗口管理器：增加了抓取冲突判定
+        AFRAME.registerComponent('magic-window-manager', {
+            init: function () {
+                this.sceneEl = document.querySelector('a-scene');
+                this.timers = { left: null, right: null };
+                this.windows = { left: null, right: null };
+
+                const setupHand = (handName) => {
+                    const handEl = document.getElementById(handName + 'Hand');
+                    
+                    handEl.addEventListener('pinchstarted', (evt) => {
+                        // 【改进点】：检查当前手是否正在抓取物体
+                        // 获取该手的抓取组件
+                        const grabControls = handEl.components['hand-tracking-grab-controls'];
+                        
+                        // 如果 grabControls 存在 并且 已经抓住了某个物体 (grabbedEl 不为空)
+                        // 或者是魔法窗口本身正在被这只手移动，则不触发创建/删除逻辑
+                        if (grabControls && grabControls.grabbedEl) {
+                            console.log(`${handName} hand is busy grabbing, skipping timer.`);
+                            return; 
+                        }
+
+                        // 只有“空手”捏合时，才启动3秒计时器
+                        this.timers[handName] = setTimeout(() => {
+                            this.toggleWindow(handName, handEl, evt.detail.position);
+                        }, 3000);
+                    });
+
+                    handEl.addEventListener('pinchended', () => {
+                        clearTimeout(this.timers[handName]);
+                    });
+                };
+
+                setupHand('left');
+                setupHand('right');
+            },
+
+            toggleWindow: function(handName, handEl, pos) {
+                if (this.windows[handName]) {
+                    this.sceneEl.removeChild(this.windows[handName]);
+                    this.windows[handName] = null;
+                    this.showStatusText(`${handName} Window Deleted`);
+                } else {
+                    const win = document.createElement('a-entity');
+                    const type = (handName === 'left') ? 'cone' : 'box';
+                    win.setAttribute('position', pos);
+                    win.setAttribute('grabbable', '');
+                    win.setAttribute('class', 'magic-window');
+                    win.setAttribute('magic-window-logic', `type: ${type}`);
+                    
+                    const camPos = document.getElementById('mainCamera').object3D.getWorldPosition(new THREE.Vector3());
+                    win.addEventListener('loaded', () => { win.object3D.lookAt(camPos); });
+
+                    this.sceneEl.appendChild(win);
+                    this.windows[handName] = win;
+                    this.showStatusText(`Created ${type} View`);
+                }
+                const anyActive = this.windows.left || this.windows.right;
+                magicObjects.forEach(obj => obj.updateStencil(!!anyActive));
+            },
+
+            showStatusText: function(msg) {
+                const text = document.createElement('a-text');
+                text.setAttribute('value', msg); text.setAttribute('position', '0 2 -1.5');
+                text.setAttribute('align', 'center');
+                this.sceneEl.appendChild(text);
+                setTimeout(() => { if(text.parentNode) this.sceneEl.removeChild(text); }, 2000);
+            }
+        });
+
+        // 左手快速pinch两次创建物体
+        AFRAME.registerComponent('double-pinch-creator', {
+            init: function () {
+                this.lastPinchTime = 0;
+                this.el.addEventListener('pinchstarted', (evt) => {
+                    const now = Date.now();
+                    if (now - this.lastPinchTime < 300) {
+                        this.createRandom(evt.detail.position);
+                    }
+                    this.lastPinchTime = now;
+                });
+            },
+            createRandom: function (pos) {
+                const el = document.createElement(Math.random() < 0.5 ? 'a-box' : 'a-sphere');
+                const color = `#${Math.floor(Math.random()*16777215).toString(16)}`;
+                el.setAttribute('width', 0.1); el.setAttribute('height', 0.1); el.setAttribute('depth', 0.1);
+                el.setAttribute('apply-magic-shader', `color: ${color}`);
+                el.setAttribute('grabbable', ''); 
+                el.setAttribute('position', pos);
+                this.el.sceneEl.appendChild(el);
+            }
+        });
+    </script>
+</head>
+<body>
+    <a-scene xr-mode-ui="XRMode: ar" renderer="stencil: true; colorManagement: true;" magic-window-manager> 
+        <a-camera id="mainCamera" position="0 1.6 0"></a-camera>
+        
+        <a-sphere position="0.2 1.0 -0.5" radius="0.1" apply-magic-shader="color: #00FF00" grabbable></a-sphere>
+        
+        <a-entity id="leftHand" hand-tracking-controls="hand: left" hand-tracking-grab-controls="hand: left" double-pinch-creator></a-entity>
+        <a-entity id="rightHand" hand-tracking-controls="hand: right" hand-tracking-grab-controls="hand: right" double-pinch-creator></a-entity>
+    </a-scene>
+</body>
+</html>
