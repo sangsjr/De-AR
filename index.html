@@ -14,7 +14,7 @@
         const COLOR_HAND_DEFAULT = '#FFFFFF'; // White
         const COLOR_HAND_GRAB = '#87CEFA';    // Blue
 
-        /************* 1. Rendering Component *************/
+        // 1. Rendering Component
         AFRAME.registerComponent('apply-magic-shader', {
             schema: { color: {type: 'color', default: '#FFFFFF'} },
             init: function() {
@@ -42,7 +42,7 @@
             }
         });
 
-        /************* 2. Left Hand: Interaction *************/
+        // 2. Left Hand: Interaction
         AFRAME.registerComponent('left-hand-logic', {
             init: function () {
                 this.lastPinchTime = 0;
@@ -107,7 +107,7 @@
             }
         });
 
-        /************* 3. Right Hand: Drawing & Color *************/
+        // 3. Right Hand: Drawing & Color
         AFRAME.registerComponent('right-hand-logic', {
             init: function () {
                 this.points = [];
