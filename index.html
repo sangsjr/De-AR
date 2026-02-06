@@ -1,208 +1,207 @@
 <!DOCTYPE html>
 <html>
-  <head>
+<head>
     <meta charset="utf-8" />
-    <title>Quest AR - Precise Grab & Move</title>
+    <title>Quest AR - Polygon Magic Window</title>
     <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
 
     <script>
-      window.DrawState = { enabled: false };
+        // --- 全局状态与常量 ---
+        window.DrawState = { enabled: false };
+        let activeMasksCount = 0; 
+        const ELEMENT_SIZE = 0.1;
+        const COLOR_LINE_ACTIVE = '#0000FF';
 
-      /************* 左手：模式控制 *************/
-      AFRAME.registerComponent('draw-mode-controller', {
-        init: function () {
-          this.holdTimer = null;
-          this.feedback = document.querySelector('#modeText');
-
-          this.el.addEventListener('pinchstarted', () => {
-            if (window.DrawState.enabled) return;
-            this.feedback.setAttribute('value', 'Hold Left Pinch... (3s)');
-            this.holdTimer = setTimeout(() => {
-              window.DrawState.enabled = true;
-              this.feedback.setAttribute('value', 'DRAW MODE ACTIVE\nUse Right Hand');
-              this.feedback.setAttribute('color', '#00FF00');
-            }, 3000);
-          });
-
-          this.el.addEventListener('pinchended', () => {
-            if (this.holdTimer) {
-              clearTimeout(this.holdTimer);
-              if (!window.DrawState.enabled) this.feedback.setAttribute('value', 'Hold Left Pinch 3s to Draw');
+        // 1. AR 元素渲染组件：受模板缓冲影响
+        AFRAME.registerComponent('apply-magic-shader', {
+            schema: { color: {type: 'color', default: '#FFFFFF'} },
+            init: function() {
+                this.applyMat = () => {
+                    const mesh = this.el.getObject3D('mesh');
+                    if (!mesh) return;
+                    mesh.material = new THREE.MeshStandardMaterial({
+                        color: new THREE.Color(this.data.color),
+                        transparent: true,
+                        opacity: 1.0,
+                        stencilWrite: true,
+                        stencilRef: 1,
+                        // 默认不启用 Stencil 测试，直到有窗口出现
+                        stencilFunc: (activeMasksCount > 0) ? THREE.NotEqualStencilFunc : THREE.AlwaysStencilFunc,
+                        stencilZPass: THREE.KeepStencilOp
+                    });
+                };
+                if (this.el.getObject3D('mesh')) this.applyMat();
+                else this.el.addEventListener('model-loaded', this.applyMat);
+            },
+            updateStencil: function(isActive) {
+                const mesh = this.el.getObject3D('mesh');
+                if (mesh && mesh.material) {
+                    mesh.material.stencilFunc = isActive ? THREE.NotEqualStencilFunc : THREE.AlwaysStencilFunc;
+                }
             }
-          });
-        }
-      });
+        });
 
-      /************* 右手：高精度绘制与边框抓取 *************/
-      AFRAME.registerComponent('ar-polygon-drawer', {
-        init: function () {
-          this.points = [];
-          this.isDrawing = false;
-          this.isMoving = false;
-          this.targetEl = null;
-          this.grabOffset = new THREE.Vector3();
-          
-          this.container = document.querySelector('#drawings-world');
-          this.cameraEl = document.querySelector('[camera]');
+        // 2. 左手逻辑：双击创建/删除 + 长按切换绘图模式
+        AFRAME.registerComponent('left-hand-logic', {
+            init: function () {
+                this.lastPinchTime = 0;
+                this.holdTimer = null;
+                this.feedback = document.querySelector('#modeText');
 
-          // 临时变量用于数学计算，避免重复创建对象
-          this._tempVecA = new THREE.Vector3();
-          this._tempVecB = new THREE.Vector3();
-          this._localHandPos = new THREE.Vector3();
+                this.el.addEventListener('pinchstarted', (evt) => {
+                    const now = Date.now();
+                    // 双击判断
+                    if (now - this.lastPinchTime < 300) {
+                        this.handleCreateDelete(evt.detail.position);
+                        clearTimeout(this.holdTimer);
+                        this.lastPinchTime = 0;
+                    } else {
+                        this.lastPinchTime = now;
+                        // 长按判断 (3秒)
+                        this.feedback.setAttribute('value', 'Holding... (3s)');
+                        this.holdTimer = setTimeout(() => {
+                            window.DrawState.enabled = true;
+                            this.feedback.setAttribute('value', 'DRAW MODE: ON');
+                            this.feedback.setAttribute('color', '#00FF00');
+                        }, 3000);
+                    }
+                });
 
-          this.el.addEventListener('pinchstarted', (evt) => {
-            const handPos = evt.detail.position;
-            if (window.DrawState.enabled) {
-              this.startDrawing(handPos);
-            } else {
-              this.tryGrabPrecision(handPos);
+                this.el.addEventListener('pinchended', () => {
+                    clearTimeout(this.holdTimer);
+                    if (!window.DrawState.enabled) {
+                        this.feedback.setAttribute('value', 'Hold Left Pinch 3s to Draw');
+                        this.feedback.setAttribute('color', '#FFFFFF');
+                    }
+                });
+            },
+            handleCreateDelete: function(pos) {
+                const rightHand = document.getElementById('rightHand');
+                const grabbedEl = rightHand.components['hand-tracking-grab-controls'].grabbedEl;
+                
+                if (grabbedEl && !grabbedEl.classList.contains('magic-mask')) {
+                    grabbedEl.parentNode.removeChild(grabbedEl);
+                } else {
+                    const el = document.createElement(Math.random() < 0.5 ? 'a-box' : 'a-sphere');
+                    const color = `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`;
+                    el.setAttribute('position', pos);
+                    el.setAttribute('apply-magic-shader', `color: ${color}`);
+                    el.setAttribute('grabbable', '');
+                    if (el.tagName === 'A-BOX') el.setAttribute('geometry', {primitive:'box', width:ELEMENT_SIZE, height:ELEMENT_SIZE, depth:ELEMENT_SIZE});
+                    else el.setAttribute('geometry', {primitive:'sphere', radius:ELEMENT_SIZE/2});
+                    this.el.sceneEl.appendChild(el);
+                }
             }
-          });
+        });
 
-          this.el.addEventListener('pinchmoved', (evt) => {
-            const handPos = evt.detail.position;
-            if (this.isDrawing) {
-              this.updateDrawing(handPos);
-            } else if (this.isMoving && this.targetEl) {
-              this.targetEl.object3D.position.copy(handPos).sub(this.grabOffset);
+        // 3. 右手逻辑：高精度绘图 + 赋予多边形 Stencil Mask 功能
+        AFRAME.registerComponent('right-hand-logic', {
+            init: function () {
+                this.points = [];
+                this.isDrawing = false;
+                this.container = document.querySelector('#drawings-world');
+
+                this.el.addEventListener('pinchstarted', (evt) => {
+                    if (window.DrawState.enabled) {
+                        this.isDrawing = true;
+                        this.points = [];
+                        this.origin = evt.detail.position.clone();
+                        // 创建预览线
+                        const cameraObj = this.el.sceneEl.camera.el.object3D;
+                        this.baseQuat = cameraObj.quaternion.clone();
+                        this.invQuat = this.baseQuat.clone().invert();
+                        
+                        const geo = new THREE.BufferGeometry();
+                        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9000), 3));
+                        this.line = new THREE.Line(geo, new THREE.LineBasicMaterial({color: COLOR_LINE_ACTIVE}));
+                        this.lineEnt = document.createElement('a-entity');
+                        this.lineEnt.setObject3D('mesh', this.line);
+                        this.lineEnt.object3D.position.copy(this.origin);
+                        this.lineEnt.object3D.quaternion.copy(this.baseQuat);
+                        this.el.sceneEl.appendChild(this.lineEnt);
+                    }
+                });
+
+                this.el.addEventListener('pinchmoved', (evt) => {
+                    if (!this.isDrawing) return;
+                    const localPos = evt.detail.position.clone().sub(this.origin).applyQuaternion(this.invQuat);
+                    this.points.push(localPos);
+                    const attr = this.line.geometry.attributes.position;
+                    attr.setXYZ(this.points.length - 1, localPos.x, localPos.y, localPos.z);
+                    this.line.geometry.setDrawRange(0, this.points.length);
+                    attr.needsUpdate = true;
+                });
+
+                this.el.addEventListener('pinchended', () => {
+                    if (this.isDrawing) {
+                        if (this.points.length > 5) this.createMagicPolygon();
+                        if (this.lineEnt) this.el.sceneEl.removeChild(this.lineEnt);
+                        this.isDrawing = false;
+                        window.DrawState.enabled = false;
+                        document.querySelector('#modeText').setAttribute('value', 'Hold Left Pinch 3s to Draw');
+                    }
+                });
+            },
+
+            createMagicPolygon: function() {
+                const shape = new THREE.Shape();
+                shape.moveTo(this.points[0].x, this.points[0].y);
+                this.points.forEach(p => shape.lineTo(p.x, p.y));
+                
+                // 1. 创建 Stencil Mask 面
+                const geometry = new THREE.ShapeGeometry(shape);
+                const maskMat = new THREE.MeshBasicMaterial({
+                    colorWrite: false, depthWrite: false, stencilWrite: true,
+                    stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp
+                });
+                const maskMesh = new THREE.Mesh(geometry, maskMat);
+                maskMesh.renderOrder = 0;
+
+                // 2. 创建可见边缘
+                const edgeGeo = new THREE.BufferGeometry().setFromPoints([...this.points, this.points[0]]);
+                const edgeMat = new THREE.LineBasicMaterial({color: COLOR_LINE_ACTIVE});
+                const edgeMesh = new THREE.Line(edgeGeo, edgeMat);
+                edgeMesh.renderOrder = 1;
+
+                const ent = document.createElement('a-entity');
+                ent.setAttribute('class', 'magic-mask');
+                ent.setObject3D('mesh', maskMesh);
+                ent.setObject3D('outline', edgeMesh);
+                ent.object3D.position.copy(this.origin);
+                ent.object3D.quaternion.copy(this.baseQuat);
+                ent.setAttribute('grabbable', ''); // 允许抓取移动窗口
+                
+                this.container.appendChild(ent);
+                activeMasksCount++;
+                this.updateAllObjects(true);
+            },
+
+            updateAllObjects: function(active) {
+                const objs = document.querySelectorAll('[apply-magic-shader]');
+                objs.forEach(o => o.components['apply-magic-shader'].updateStencil(active));
             }
-          });
-
-          this.el.addEventListener('pinchended', () => {
-            if (this.isDrawing) this.stopDrawing();
-            if (this.isMoving && this.targetEl) {
-                // 放开时恢复颜色
-                this.targetEl.getObject3D('mesh').material.color.set(0x00ff00);
-            }
-            this.isMoving = false;
-            this.targetEl = null;
-          });
-        },
-
-        // --- 绘制逻辑 (保持高效实时预览) ---
-        startDrawing: function(pos) {
-          this.isDrawing = true;
-          this.points = [];
-          this.origin = pos.clone();
-          this.baseQuat = this.cameraEl.object3D.quaternion.clone();
-          this.invQuat = this.baseQuat.clone().invert();
-
-          const geometry = new THREE.BufferGeometry();
-          geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6000), 3));
-          this.previewLine = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0x00ff00 }));
-          this.lineEntity = document.createElement('a-entity');
-          this.lineEntity.setObject3D('mesh', this.previewLine);
-          this.lineEntity.object3D.position.copy(this.origin);
-          this.lineEntity.object3D.quaternion.copy(this.baseQuat);
-          this.el.sceneEl.appendChild(this.lineEntity);
-          this.addPoint(new THREE.Vector3(0, 0, 0));
-        },
-
-        updateDrawing: function(pos) {
-          const localPos = pos.clone().sub(this.origin).applyQuaternion(this.invQuat);
-          const last = this.points[this.points.length - 1];
-          if (last && last.distanceTo(localPos) > 0.002) this.addPoint(localPos);
-        },
-
-        addPoint: function (point) {
-          this.points.push(point);
-          const posAttr = this.previewLine.geometry.attributes.position;
-          posAttr.setXYZ(this.points.length - 1, point.x, point.y, point.z);
-          this.previewLine.geometry.setDrawRange(0, this.points.length);
-          posAttr.needsUpdate = true;
-        },
-
-        stopDrawing: function() {
-          this.isDrawing = false;
-          if (this.points.length > 2) this.generateFinalBorder();
-          if (this.lineEntity) this.el.sceneEl.removeChild(this.lineEntity);
-          window.DrawState.enabled = false;
-          document.querySelector('#modeText').setAttribute('value', 'Hold Left Pinch 3s to Draw');
-          document.querySelector('#modeText').setAttribute('color', '#FFFFFF');
-        },
-
-        // --- 高精度抓取：点到线段的距离检测 ---
-        tryGrabPrecision: function(handPos) {
-          const drawings = this.container.querySelectorAll('a-entity');
-          let bestTarget = null;
-          let minDistance = 0.05; // 5cm 判定范围
-
-          drawings.forEach(entity => {
-            const mesh = entity.getObject3D('mesh');
-            if (!mesh) return;
-
-            // 将手部世界坐标转为物体局部坐标
-            this._localHandPos.copy(handPos);
-            entity.object3D.worldToLocal(this._localHandPos);
-
-            const pts = mesh.geometry.userData.originalPoints;
-            if (!pts) return;
-
-            // 遍历多边形的每一条边
-            for (let i = 0; i < pts.length; i++) {
-              const p1 = pts[i];
-              const p2 = pts[(i + 1) % pts.length]; // 闭合环路
-
-              const dist = this.getPointToSegmentDistance(this._localHandPos, p1, p2);
-              if (dist < minDistance) {
-                minDistance = dist;
-                bestTarget = entity;
-              }
-            }
-          });
-
-          if (bestTarget) {
-            this.isMoving = true;
-            this.targetEl = bestTarget;
-            this.grabOffset.copy(handPos).sub(bestTarget.object3D.position);
-            // 抓取视觉反馈：变暗
-            this.targetEl.getObject3D('mesh').material.color.set(0x008800);
-          }
-        },
-
-        // 计算点 P 到线段 AB 的最短距离
-        getPointToSegmentDistance: function(p, a, b) {
-          const line = this._tempVecA.copy(b).sub(a);
-          const lenSq = line.lengthSq();
-          if (lenSq === 0) return p.distanceTo(a);
-          
-          const t = Math.max(0, Math.min(1, this._tempVecB.copy(p).sub(a).dot(line) / lenSq));
-          this._tempVecB.copy(a).add(line.multiplyScalar(t));
-          return p.distanceTo(this._tempVecB);
-        },
-
-        generateFinalBorder: function () {
-          const geometry = new THREE.BufferGeometry().setFromPoints(this.points);
-          // 存储点集用于后续抓取判定
-          geometry.userData.originalPoints = this.points;
-          
-          const material = new THREE.LineBasicMaterial({ color: 0x00ff00 });
-          const lineLoop = new THREE.LineLoop(geometry, material);
-          
-          const entity = document.createElement('a-entity');
-          entity.object3D.position.copy(this.origin);
-          entity.object3D.quaternion.copy(this.baseQuat);
-          entity.setObject3D('mesh', lineLoop);
-
-          this.container.appendChild(entity);
-        }
-      });
+        });
     </script>
-  </head>
+</head>
+<body>
+    <a-scene xr-mode-ui="XRMode: ar" renderer="stencil: true; colorManagement: true;">
+        <a-camera id="mainCamera" position="0 1.6 0">
+            <a-text id="modeText" value="Hold Left Pinch 3s to Draw" position="0 0.2 -0.8" align="center" scale="0.25"></a-text>
+        </a-camera>
 
-  <body>
-    <a-scene
-      xr-mode-ui="XRMode: ar"
-      webxr="optionalFeatures: hand-tracking; referenceSpaceType: local-floor;"
-      renderer="alpha: true; antialias: true;"
-    >
-      <a-light type="ambient" intensity="0.8"></a-light>
-      <a-entity camera look-controls position="0 1.6 0">
-        <a-text id="modeText" value="Hold Left Pinch 3s to Draw" position="0 0.2 -0.8" align="center" scale="0.3"></a-text>
-      </a-entity>
-      <a-entity hand-tracking-controls="hand: left" draw-mode-controller></a-entity>
-      <a-entity hand-tracking-controls="hand: right" ar-polygon-drawer></a-entity>
-      <a-entity id="drawings-world"></a-entity>
+        <a-sphere position="0 1.2 -0.5" radius="0.1" apply-magic-shader="color: #00FF00" grabbable></a-sphere>
+
+        <a-entity id="leftHand" hand-tracking-controls="hand: left" left-hand-logic></a-entity>
+
+        <a-entity id="rightHand" 
+                  hand-tracking-controls="hand: right" 
+                  hand-tracking-grab-controls="hand: right"
+                  right-hand-logic>
+        </a-entity>
+
+        <a-entity id="drawings-world"></a-entity>
+
+        <a-light type="ambient" intensity="0.7"></a-light>
     </a-scene>
-  </body>
+</body>
 </html>
