@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Quest AR - Drawing Mode Grab Lock</title>
+    <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+
+    <script>
+        window.DrawState = { enabled: false };
+        let activeMasksCount = 0; 
+        const ELEMENT_SIZE = 0.1;
+        const COLOR_LINE_ACTIVE = '#0000FF'; // Blue
+        const COLOR_HAND_DEFAULT = '#FFFFFF'; // White
+        const COLOR_HAND_GRAB = '#87CEFA';    // Blue
+
+        AFRAME.registerComponent('apply-magic-shader', {
+            schema: { color: {type: 'color', default: '#FFFFFF'} },
+            init: function() {
+                this.applyMat = () => {
+                    const mesh = this.el.getObject3D('mesh');
+                    if (!mesh) return;
+                    mesh.material = new THREE.MeshStandardMaterial({
+                        color: new THREE.Color(this.data.color),
+                        transparent: true,
+                        opacity: 1.0,
+                        stencilWrite: true,
+                        stencilRef: 1,
+                        stencilFunc: (activeMasksCount > 0) ? THREE.NotEqualStencilFunc : THREE.AlwaysStencilFunc,
+                        stencilZPass: THREE.KeepStencilOp
+                    });
+                };
+                if (this.el.getObject3D('mesh')) this.applyMat();
+                else this.el.addEventListener('model-loaded', this.applyMat);
+            },
+            updateStencil: function(isActive) {
+                const mesh = this.el.getObject3D('mesh');
+                if (mesh && mesh.material) {
+                    mesh.material.stencilFunc = isActive ? THREE.NotEqualStencilFunc : THREE.AlwaysStencilFunc;
+                }
+            }
+        });
+
+        AFRAME.registerComponent('left-hand-logic', {
+            init: function () {
+                this.lastPinchTime = 0;
+                this.holdTimer = null;
+                this.feedback = document.querySelector('#modeText');
+
+                this.el.addEventListener('pinchstarted', (evt) => {
+                    const now = Date.now();
+                    if (now - this.lastPinchTime < 300) {
+                        console.log("[Action] Double pinch: Triggering logic.");
+                        this.handleCreateDelete(evt.detail.position);
+                        clearTimeout(this.holdTimer);
+                        this.lastPinchTime = 0;
+                    } else {
+                        this.lastPinchTime = now;
+                        this.feedback.setAttribute('value', 'Holding... (3s)');
+                        this.holdTimer = setTimeout(() => {
+                            window.DrawState.enabled = true;
+                            console.log("[Mode] DRAW MODE ACTIVATED. Disabling right hand grab.");
+                            
+                            // 锁定右手抓取功能
+                            const rightHand = document.getElementById('rightHand');
+                            rightHand.setAttribute('hand-tracking-grab-controls', 'enabled', false);
+
+                            this.feedback.setAttribute('value', 'DRAW MODE: ON');
+                            this.feedback.setAttribute('color', COLOR_LINE_ACTIVE);
+                        }, 3000);
+                    }
+                });
+
+                this.el.addEventListener('pinchended', () => {
+                    clearTimeout(this.holdTimer);
+                    if (!window.DrawState.enabled) {
+                        this.feedback.setAttribute('value', 'Hold Left Pinch 3s to Draw');
+                        this.feedback.setAttribute('color', '#FFFFFF');
+                    }
+                });
+            },
+            handleCreateDelete: function(pos) {
+                const rightHand = document.getElementById('rightHand');
+                const grabComp = rightHand.components['hand-tracking-grab-controls'];
+                const grabbedEl = (grabComp && grabComp.data.enabled) ? grabComp.grabbedEl : null;
+                
+                if (grabbedEl && !grabbedEl.classList.contains('magic-mask')) {
+                    console.log("[Action] Deleting AR Object.");
+                    grabbedEl.parentNode.removeChild(grabbedEl);
+                } else if (!grabbedEl) {
+                    this.createRandom(pos);
+                }
+            },
+            createRandom: function(pos) {
+                const type = Math.random() < 0.5 ? 'a-box' : 'a-sphere';
+                const el = document.createElement(type);
+                const color = `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`;
+                el.setAttribute('position', pos);
+                el.setAttribute('apply-magic-shader', `color: ${color}`);
+                el.setAttribute('grabbable', '');
+                if (type === 'a-box') el.setAttribute('geometry', {primitive:'box', width:ELEMENT_SIZE, height:ELEMENT_SIZE, depth:ELEMENT_SIZE});
+                else el.setAttribute('geometry', {primitive:'sphere', radius:ELEMENT_SIZE/2});
+                this.el.sceneEl.appendChild(el);
+                console.log(`[Action] Created ${type}.`);
+            }
+        });
+
+        AFRAME.registerComponent('right-hand-logic', {
+            init: function () {
+                this.points = [];
+                this.isDrawing = false;
+                this.container = document.querySelector('#drawings-world');
+
+                this.el.addEventListener('model-loaded', () => this.updateHandColor(COLOR_HAND_DEFAULT));
+                this.el.addEventListener('grab-start', () => this.updateHandColor(COLOR_HAND_GRAB));
+                this.el.addEventListener('grab-end', () => this.updateHandColor(COLOR_HAND_DEFAULT));
+
+                this.el.addEventListener('pinchstarted', (evt) => {
+                    this.updateHandColor(COLOR_HAND_GRAB); 
+                    if (window.DrawState.enabled) {
+                        this.isDrawing = true;
+                        this.points = [];
+                        this.origin = evt.detail.position.clone();
+                        console.log("[Draw] Drawing started. Grab is locked.");
+                        
+                        const cameraObj = this.el.sceneEl.camera.el.object3D;
+                        this.baseQuat = cameraObj.quaternion.clone();
+                        this.invQuat = this.baseQuat.clone().invert();
+                        
+                        const geo = new THREE.BufferGeometry();
+                        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9000), 3));
+                        this.line = new THREE.Line(geo, new THREE.LineBasicMaterial({color: COLOR_LINE_ACTIVE}));
+                        this.lineEnt = document.createElement('a-entity');
+                        this.lineEnt.setObject3D('mesh', this.line);
+                        this.lineEnt.object3D.position.copy(this.origin);
+                        this.lineEnt.object3D.quaternion.copy(this.baseQuat);
+                        this.el.sceneEl.appendChild(this.lineEnt);
+                    }
+                });
+
+                this.el.addEventListener('pinchmoved', (evt) => {
+                    if (!this.isDrawing) return;
+                    const localPos = evt.detail.position.clone().sub(this.origin).applyQuaternion(this.invQuat);
+                    if (this.points.length === 0 || this.points[this.points.length-1].distanceTo(localPos) > 0.005) {
+                        this.points.push(localPos);
+                        const attr = this.line.geometry.attributes.position;
+                        attr.setXYZ(this.points.length - 1, localPos.x, localPos.y, localPos.z);
+                        this.line.geometry.setDrawRange(0, this.points.length);
+                        attr.needsUpdate = true;
+                    }
+                });
+
+                this.el.addEventListener('pinchended', () => {
+                    this.updateHandColor(COLOR_HAND_DEFAULT); 
+                    if (this.isDrawing) {
+                        if (this.points.length > 5) this.createMagicPolygon();
+                        if (this.lineEnt) this.el.sceneEl.removeChild(this.lineEnt);
+                        
+                        this.isDrawing = false;
+                        window.DrawState.enabled = false;
+                        
+                        const rightHand = document.getElementById('rightHand');
+                        rightHand.setAttribute('hand-tracking-grab-controls', 'enabled', true);
+                        
+                        console.log("[Mode] Drawing finished. Grab re-enabled.");
+                        this.resetFeedback();
+                    }
+                });
+            },
+            updateHandColor: function(color) {
+                const mesh = this.el.getObject3D('mesh');
+                if (mesh) mesh.traverse(node => { if (node.isMesh) node.material.color.set(color); });
+            },
+            resetFeedback: function() {
+                const text = document.querySelector('#modeText');
+                text.setAttribute('value', 'Hold Left Pinch 3s to Draw');
+                text.setAttribute('color', '#FFFFFF');
+            },
+            createMagicPolygon: function() {
+                const shape = new THREE.Shape();
+                shape.moveTo(this.points[0].x, this.points[0].y);
+                this.points.forEach(p => shape.lineTo(p.x, p.y));
+                
+                const group = new THREE.Group();
+                const maskGeo = new THREE.ShapeGeometry(shape);
+                const maskMesh = new THREE.Mesh(maskGeo, new THREE.MeshBasicMaterial({
+                    colorWrite: false, depthWrite: false, stencilWrite: true,
+                    stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp
+                }));
+                maskMesh.renderOrder = 0;
+                group.add(maskMesh);
+
+                const edgeGeo = new THREE.BufferGeometry().setFromPoints([...this.points, this.points[0]]);
+                const edgeLine = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({color: COLOR_LINE_ACTIVE}));
+                edgeLine.renderOrder = 1;
+                group.add(edgeLine);
+
+                const ent = document.createElement('a-entity');
+                ent.classList.add('magic-mask');
+                ent.setObject3D('mesh', group); 
+                ent.object3D.position.copy(this.origin);
+                ent.object3D.quaternion.copy(this.baseQuat);
+                ent.setAttribute('grabbable', ''); 
+                
+                this.container.appendChild(ent);
+                activeMasksCount++;
+                document.querySelectorAll('[apply-magic-shader]').forEach(o => {
+                    o.components['apply-magic-shader'].updateStencil(true);
+                });
+            }
+        });
+    </script>
+</head>
+<body>
+    <a-scene xr-mode-ui="XRMode: ar" renderer="stencil: true; colorManagement: true;">
+        <a-camera id="mainCamera" position="0 1.6 0">
+            <a-text id="modeText" value="Hold Left Pinch 3s to Draw" position="0 0.2 -0.8" align="center" scale="0.25"></a-text>
+        </a-camera>
+
+        <a-sphere position="0 1.2 -0.5" radius="0.1" apply-magic-shader="color: #00FF00" grabbable></a-sphere>
+
+        <a-entity id="leftHand" hand-tracking-controls="hand: left" left-hand-logic></a-entity>
+        
+        <a-entity id="rightHand" 
+                  hand-tracking-controls="hand: right" 
+                  hand-tracking-grab-controls="hand: right"
+                  right-hand-logic>
+        </a-entity>
+
+        <a-entity id="drawings-world"></a-entity>
+    </a-scene>
+</body>
+</html>
