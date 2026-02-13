@@ -65,7 +65,7 @@ npm run dev
 
 - **Feature:** Allows the user to draw a free-form shape in the air which then acts as a 2D stencil window. It records the hand trajectory and connects the points using `THREE.Shape`.
 
-- **Trigger:** 1. Hold **Left Pinch for 3 seconds** to enter "Drawing Mode."
-  
+- **Trigger:**
+  1. Hold **Left Pinch for 3 seconds** to enter "Drawing Mode."
   2. Pinch and move **Right Hand** to draw the desired shape.
   3. Release the pinch to generate the magic window and return to standard interaction mode.
