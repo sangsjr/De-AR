@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Magic Window Hub - Merge Overlap Fix</title>
+    <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+    <style>body { margin: 0; overflow: hidden; }</style>
+
+    <script>
+        window.ActiveMode = 'none'; 
+        window.DrawState = { enabled: false };
+        let activeMasksCount = 0; 
+        const ELEMENT_SIZE = 0.1;
+        const COLOR_DEFAULT_ZONE = '#0000FF'; 
+
+        AFRAME.registerComponent('apply-magic-shader', {
+            schema: { color: {type: 'color', default: '#FFFFFF'} },
+            init: function() {
+                this.applyMat = () => {
+                    const mesh = this.el.getObject3D('mesh');
+                    if (!mesh) return;
+                    mesh.material = new THREE.MeshStandardMaterial({
+                        color: new THREE.Color(this.data.color),
+                        transparent: true, opacity: 1.0, stencilWrite: true, stencilRef: 1,
+                        stencilFunc: (activeMasksCount > 0) ? THREE.NotEqualStencilFunc : THREE.AlwaysStencilFunc,
+                        stencilZPass: THREE.KeepStencilOp
+                    });
+                };
+                if (this.el.getObject3D('mesh')) this.applyMat();
+                else this.el.addEventListener('model-loaded', this.applyMat);
+            },
+            updateStencil: function(isActive) {
+                const mesh = this.el.getObject3D('mesh');
+                if (mesh && mesh.material) {
+                    mesh.material.stencilFunc = isActive ? THREE.NotEqualStencilFunc : THREE.AlwaysStencilFunc;
+                }
+            }
+        });
+
+        function getMagicMaterials(geometry) {
+            const maskMat = new THREE.MeshBasicMaterial({ 
+                colorWrite: false, 
+                depthWrite: false, 
+                stencilWrite: true, 
+                stencilRef: 1, 
+                stencilFunc: THREE.AlwaysStencilFunc, 
+                stencilZPass: THREE.ReplaceStencilOp 
+            });
+
+            const outlineMat = new THREE.ShaderMaterial({
+                uniforms: { thickness: { value: 0.005 }, color: { value: new THREE.Color(COLOR_DEFAULT_ZONE) } },
+                vertexShader: `
+                    uniform float thickness; 
+                    void main() { 
+                        vec3 pos = position + normal * thickness; 
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0); 
+                    }`,
+                fragmentShader: `
+                    uniform vec3 color; 
+                    void main() { gl_FragColor = vec4(color, 1.0); }`,
+                side: THREE.BackSide, 
+                stencilWrite: true, 
+                stencilRef: 1, 
+                stencilFunc: THREE.NotEqualStencilFunc, 
+                stencilZPass: THREE.KeepStencilOp
+            });
+
+            return { maskMat, outlineMat };
+        }
+
+        const isRightHandBusy = () => {
+            const rh = document.getElementById('rightHand').components['hand-tracking-grab-controls'];
+            return !!(rh && rh.grabbedEl);
+        };
+
+        // 2D Plane
+        AFRAME.registerComponent('logic-window-plane', {
+            init: function() {
+                this.isL = false; this.isR = false;
+                this.check = () => { if(this.isL && this.isR && !isRightHandBusy()) this.spawn(this.lp); };
+                this.el.sceneEl.addEventListener('pinchstarted', (e) => {
+                    if(window.ActiveMode !== 'plane' || isRightHandBusy()) return;
+                    if(e.target.id === 'leftHand') { this.isL = true; this.lp = e.detail.position.clone(); }
+                    if(e.target.id === 'rightHand') this.isR = true;
+                    if(this.isL && this.isR) this.timer = setTimeout(this.check, 3000);
+                });
+                this.el.sceneEl.addEventListener('pinchended', (e) => {
+                    if(e.target.id === 'leftHand') this.isL = false;
+                    if(e.target.id === 'rightHand') this.isR = false;
+                    clearTimeout(this.timer);
+                });
+            },
+            spawn: function(pos) {
+                const win = document.createElement('a-entity');
+                const geo = new THREE.PlaneGeometry(0.4, 0.3);
+                const mats = getMagicMaterials(geo);
+                win.setObject3D('mesh', new THREE.Mesh(geo, mats.maskMat));
+                
+                const outline = new THREE.LineSegments(
+                    new THREE.EdgesGeometry(geo), 
+                    new THREE.LineBasicMaterial({
+                        color: COLOR_DEFAULT_ZONE,
+                        stencilWrite: true, stencilRef: 1, 
+                        stencilFunc: THREE.NotEqualStencilFunc, 
+                        stencilZPass: THREE.KeepStencilOp
+                    })
+                );
+                win.setObject3D('outline', outline);
+                
+                win.setAttribute('position', pos); win.setAttribute('grabbable', ''); win.classList.add('magic-window');
+                const cam = new THREE.Vector3(); document.getElementById('mainCamera').object3D.getWorldPosition(cam);
+                win.addEventListener('loaded', () => win.object3D.lookAt(cam));
+                this.el.sceneEl.appendChild(win);
+                activeMasksCount++;
+                document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+            }
+        });
+
+        // 3D Shapes (Cone & Box)
+        AFRAME.registerComponent('logic-3d-shapes', {
+            init: function() {
+                this.ts = { leftHand: null, rightHand: null };
+                const setup = (id) => {
+                    const el = document.getElementById(id);
+                    el.addEventListener('pinchstarted', (evt) => {
+                        if(window.ActiveMode !== 'shapes' || isRightHandBusy()) return;
+                        this.ts[id] = setTimeout(() => { if(!isRightHandBusy()) this.spawn(id, evt.detail.position); }, 3000);
+                    });
+                    el.addEventListener('pinchended', () => clearTimeout(this.ts[id]));
+                };
+                setup('leftHand'); setup('rightHand');
+            },
+            spawn: function(hand, pos) {
+                const win = document.createElement('a-entity');
+                const geo = (hand === 'leftHand') ? new THREE.ConeGeometry(0.2, 0.4, 32) : new THREE.BoxGeometry(0.4, 0.3, 0.4);
+                const mats = getMagicMaterials(geo);
+                
+                win.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
+                win.setObject3D('outline', new THREE.Mesh(geo, mats.outlineMat));
+                
+                win.setAttribute('position', pos); win.setAttribute('grabbable', ''); win.classList.add('magic-window');
+                this.el.sceneEl.appendChild(win);
+                activeMasksCount++;
+                document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+            }
+        });
+
+        // Draw Any
+        AFRAME.registerComponent('logic-draw-any', {
+            init: function() {
+                this.lh = document.getElementById('leftHand');
+                this.rh = document.getElementById('rightHand');
+                this.lh.addEventListener('pinchstarted', () => {
+                    if(window.ActiveMode !== 'draw' || isRightHandBusy()) return;
+                    this.timer = setTimeout(() => { 
+                        window.DrawState.enabled = true;
+                        this.rh.setAttribute('hand-tracking-grab-controls', 'enabled', false);
+                        document.querySelector('#modeText').setAttribute('value', 'DRAWING: ON');
+                    }, 3000);
+                });
+                this.lh.addEventListener('pinchended', () => clearTimeout(this.timer));
+
+                this.rh.addEventListener('pinchstarted', (e) => {
+                    if(!window.DrawState.enabled) return;
+                    this.pts = []; this.org = e.detail.position.clone();
+                    const camObj = this.el.sceneEl.camera.el.object3D;
+                    this.bQuat = camObj.quaternion.clone();
+                    this.iQuat = this.bQuat.clone().invert();
+                    this.lineGeo = new THREE.BufferGeometry();
+                    this.lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9000), 3));
+                    this.lineEnt = document.createElement('a-entity');
+                    this.lineEnt.setObject3D('mesh', new THREE.Line(this.lineGeo, new THREE.LineBasicMaterial({color: COLOR_DEFAULT_ZONE})));
+                    this.lineEnt.object3D.position.copy(this.org);
+                    this.lineEnt.object3D.quaternion.copy(this.bQuat);
+                    this.el.sceneEl.appendChild(this.lineEnt);
+                    this.isDraw = true;
+                });
+                this.rh.addEventListener('pinchmoved', (e) => {
+                    if(!this.isDraw) return;
+                    const p = e.detail.position.clone().sub(this.org).applyQuaternion(this.iQuat);
+                    this.pts.push(p);
+                    const attr = this.lineGeo.attributes.position;
+                    attr.setXYZ(this.pts.length-1, p.x, p.y, p.z); attr.needsUpdate = true;
+                    this.lineGeo.setDrawRange(0, this.pts.length);
+                });
+                this.rh.addEventListener('pinchended', () => {
+                    if(!this.isDraw) return;
+                    this.createMask(); this.el.sceneEl.removeChild(this.lineEnt);
+                    this.isDraw = false; window.DrawState.enabled = false;
+                    this.rh.setAttribute('hand-tracking-grab-controls', 'enabled', true);
+                    document.querySelector('#modeText').setAttribute('value', 'Active: DRAW ANY');
+                });
+            },
+            createMask: function() {
+                if(this.pts.length < 3) return;
+                const shape = new THREE.Shape(); shape.moveTo(this.pts[0].x, this.pts[0].y);
+                this.pts.forEach(p => shape.lineTo(p.x, p.y));
+                const geo = new THREE.ShapeGeometry(shape);
+                const ent = document.createElement('a-entity');
+                
+                const mats = getMagicMaterials(geo);
+                ent.setObject3D('mesh', new THREE.Mesh(geo, mats.maskMat));
+                
+                const edgeGeo = new THREE.BufferGeometry().setFromPoints([...this.pts, this.pts[0]]);
+                const outline = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({
+                    color: COLOR_DEFAULT_ZONE,
+                    stencilWrite: true, stencilRef: 1, 
+                    stencilFunc: THREE.NotEqualStencilFunc, 
+                    stencilZPass: THREE.KeepStencilOp
+                }));
+                ent.setObject3D('outline', outline);
+                
+                ent.setAttribute('position', this.org); ent.object3D.quaternion.copy(this.bQuat);
+                ent.setAttribute('grabbable', ''); ent.classList.add('magic-mask');
+                this.el.sceneEl.appendChild(ent);
+                activeMasksCount++;
+                document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+            }
+        });
+
+        // General Interaction
+        AFRAME.registerComponent('general-interaction', {
+            init: function () {
+                this.lastPinchTime = 0;
+                this.el.addEventListener('pinchstarted', (evt) => {
+                    if (this.el.id !== 'leftHand') return;
+                    const now = Date.now();
+                    if (now - this.lastPinchTime < 300) {
+                        const rhGrab = document.getElementById('rightHand').components['hand-tracking-grab-controls'];
+                        const grabbed = rhGrab ? rhGrab.grabbedEl : null;
+                        if (grabbed && !grabbed.classList.contains('magic-window') && !grabbed.classList.contains('magic-mask')) {
+                            grabbed.parentNode.removeChild(grabbed);
+                        } else { this.spawn(evt.detail.position); }
+                        this.lastPinchTime = 0;
+                    } else { this.lastPinchTime = now; }
+                });
+            },
+            spawn: function(pos) {
+                const el = document.createElement(Math.random() < 0.5 ? 'a-box' : 'a-sphere');
+                el.setAttribute('position', pos);
+                el.setAttribute('apply-magic-shader', `color: #${Math.floor(Math.random()*16777215).toString(16)}`);
+                el.setAttribute('grabbable', '');
+                if (el.tagName === 'A-BOX') el.setAttribute('geometry', {primitive:'box', width:ELEMENT_SIZE, height:ELEMENT_SIZE, depth:ELEMENT_SIZE});
+                else el.setAttribute('geometry', {primitive:'sphere', radius:ELEMENT_SIZE/2});
+                this.el.sceneEl.appendChild(el);
+            }
+        });
+
+        AFRAME.registerComponent('hub-controller', {
+            init: function() {
+                const btns = document.querySelectorAll('.menu-btn');
+                btns.forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        window.ActiveMode = btn.id.replace('btn-', '');
+                        btns.forEach(b => b.setAttribute('color', '#333')); btn.setAttribute('color', '#007AFF');
+                        document.querySelector('#modeText').setAttribute('value', 'Active: ' + window.ActiveMode.toUpperCase());
+                        document.querySelectorAll('.magic-window, .magic-mask').forEach(el => el.parentNode.removeChild(el));
+                        activeMasksCount = 0;
+                        document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(false));
+                    });
+                });
+            }
+        });
+
+        AFRAME.registerComponent('menu-spawner', {
+            init: function() {
+                this.el.sceneEl.addEventListener('enter-vr', () => {
+                    const cam = document.getElementById('mainCamera').object3D;
+                    const pos = new THREE.Vector3(0.3, 0, -0.6); 
+                    this.el.object3D.position.copy(pos.applyMatrix4(cam.matrixWorld));
+                    this.el.object3D.lookAt(cam.getWorldPosition(new THREE.Vector3()));
+                });
+            }
+        });
+    </script>
+</head>
+<body>
+    <a-scene xr-mode-ui="XRMode: ar" renderer="stencil: true; colorManagement: true;">
+        <a-camera id="mainCamera">
+            <a-cursor position="0 0 -0.7" fuse="false" raycaster="objects: .menu-btn" color="#007AFF"></a-cursor>
+            <a-text id="modeText" value="Select a Module" position="0 0.3 -0.8" align="center" scale="0.2"></a-text>
+        </a-camera>
+
+        <a-entity id="menu-panel" menu-spawner hub-controller position="0.3 1.5 -0.6">
+            <a-plane color="#222" width="0.3" height="0.4" opacity="0.9">
+                <a-text value="MAGIC HUB" align="center" position="0 0.15 0.01" scale="0.18 0.18 0.18"></a-text>
+                <a-plane id="btn-plane" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 0.07 0.02"><a-text value="2D Window" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
+                <a-plane id="btn-shapes" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 -0.01 0.02"><a-text value="3D Shapes" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
+                <a-plane id="btn-draw" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 -0.09 0.02"><a-text value="Draw Any" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
+            </a-plane>
+        </a-entity>
+
+        <a-entity id="leftHand" hand-tracking-controls="hand: left" general-interaction logic-window-plane logic-3d-shapes logic-draw-any></a-entity>
+        <a-entity id="rightHand" hand-tracking-controls="hand: right" hand-tracking-grab-controls="hand: right" general-interaction></a-entity>
+
+        <a-sphere position="0 1.2 -0.8" radius="0.1" apply-magic-shader="color: #00FF00" grabbable></a-sphere>
+        <a-box position="0.3 1.2 -0.8" scale="0.15 0.15 0.15" apply-magic-shader="color: #FF0000" grabbable></a-box>
+    </a-scene>
+</body>
+</html>
