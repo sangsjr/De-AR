@@ -9,6 +9,7 @@
         <script>
         // ---------------------------------------------------
         // 1. Global Parameters
+        // ---------------------------------------------------
         const LONG_PINCH_DURATION = 2000; // Long-pinch duration for all interactions (2s)
         const PREVIEW_DURATION = 1000;    // Duration for previewing the original geometry (1s)
         const COLOR_DEFAULT_ZONE = '#007AFF'; // Primary UI and Wireframe color
@@ -17,12 +18,13 @@
         // State Variables
         window.ActiveMode = 'none'; // Current active module: 'plane', 'shapes', 'draw'
         window.DrawState = { enabled: false }; // State for 'draw' module: enabled or disabled
-        let activeMasksCount = 0; // // Number of active "Magic Mask" in the scene
-        // ---------------------------------------------------
+        let activeMasksCount = 0; // Number of active "Magic Mask" in the scene
+        
         
 
         // ---------------------------------------------------
         // 2. CORE RENDERING COMPONENTS (Stencil Buffer Logic)
+        // ---------------------------------------------------
 
         /**
          * Component: apply-magic-shader
@@ -37,10 +39,13 @@
                     if (!mesh) return;
                     mesh.material = new THREE.MeshStandardMaterial({
                         color: new THREE.Color(this.data.color),
-                        transparent: true, opacity: 1.0, stencilWrite: true, stencilRef: 1,
+                        transparent: true,
+                        opacity: 1.0,
+                        stencilWrite: true, // Tells the GPU to pay attention to the stencil buffer
+                        stencilRef: 1,      // The ID we are looking for in the buffer
                         // If masks exist, use NotEqualStencilFunc to hide parts overlapping the mask
                         stencilFunc: (activeMasksCount > 0) ? THREE.NotEqualStencilFunc : THREE.AlwaysStencilFunc,
-                        stencilZPass: THREE.KeepStencilOp
+                        stencilZPass: THREE.KeepStencilOp // Don't change the buffer, just read it
                     });
                 };
                 if (this.el.getObject3D('mesh')) this.applyMat();
@@ -62,18 +67,37 @@
          * 2. outlineMat: A shader material that renders a glowing border around the mask area.
         */
         function getMagicMaterials() {
+            // 1. THE MASK: This is the "Invisibility Cloak".
+            // It doesn't have a color (colorWrite: false), but it writes a '1' into the Stencil Buffer.
             const maskMat = new THREE.MeshBasicMaterial({ 
-                colorWrite: false, depthWrite: false, stencilWrite: true, 
-                stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp 
+                colorWrite: false,
+                depthWrite: false,
+                stencilWrite: true, 
+                stencilRef: 1,
+                stencilFunc: THREE.AlwaysStencilFunc,
+                stencilZPass: THREE.ReplaceStencilOp // REPLACES the buffer value with '1' where this mesh sits
             });
+
+            // 2. THE BLUE OUTLINE: Custom Shader.
+            // vertexShader: Expands the mesh slightly (position + normal * thickness) to create an outer shell.
+            // stencilFunc: NotEqualStencilFunc ensures the blue border doesn't cover the "hole" itself.
             const outlineMat = new THREE.ShaderMaterial({
-                uniforms: { thickness: { value: 0.005 }, color: { value: new THREE.Color(COLOR_DEFAULT_ZONE) } },
+                uniforms: {
+                    thickness: { value: 0.005 }, // Width of the blue border
+                    color: { value: new THREE.Color(COLOR_DEFAULT_ZONE) } }, // Set color
+                // Pushes vertices outward for outline effect
                 vertexShader: `
                     uniform float thickness; 
-                    void main() { vec3 pos = position + normal * thickness; gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0); }`,
+                    void main() {
+                        vec3 pos = position + normal * thickness;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+                    }`,
                 fragmentShader: `uniform vec3 color; void main() { gl_FragColor = vec4(color, 1.0); }`,
-                side: THREE.BackSide, stencilWrite: true, stencilRef: 1, 
-                stencilFunc: THREE.NotEqualStencilFunc, stencilZPass: THREE.KeepStencilOp
+                side: THREE.BackSide, // Renders the inside-out faces to show the border behind the mask
+                stencilWrite: true,
+                stencilRef: 1, 
+                stencilFunc: THREE.NotEqualStencilFunc,
+                stencilZPass: THREE.KeepStencilOp
             });
             return { maskMat, outlineMat };
         }
@@ -83,11 +107,11 @@
             const rh = document.getElementById('rightHand').components['hand-tracking-grab-controls'];
             return !!(rh && rh.grabbedEl);
         };
-        // ---------------------------------------------------
-
+        
 
         // ---------------------------------------------------
         // 3. INTERACTION MODULES (Logic for each Mode)
+        // ---------------------------------------------------
 
         /**
          * Mode A: 2D Plane
@@ -106,7 +130,7 @@
                 this.el.sceneEl.addEventListener('pinchended', (e) => {
                     if(e.target.id === 'leftHand') this.isL = false;
                     if(e.target.id === 'rightHand') this.isR = false;
-                    clearTimeout(this.timer);
+                    clearTimeout(this.timer); // Cancels create if hands release before 2s
                 });
             },
             spawn: function(pos) {
@@ -114,6 +138,7 @@
                 const geo = new THREE.PlaneGeometry(0.4, 0.3);
 
                 // Stage 1: Wireframe Preview
+                // EdgesGeometry + LineSegments create the initial hollow blue rectangle
                 const previewLines = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: COLOR_DEFAULT_ZONE }));
                 win.setObject3D('preview', previewLines);
                 win.setAttribute('position', pos); win.setAttribute('grabbable', ''); win.classList.add('magic-window');
@@ -125,14 +150,18 @@
 
                 // Stage 2: Conversion to Stencil Mask after preview timeout
                 setTimeout(() => {
-                    win.removeObject3D('preview');
+                    win.removeObject3D('preview'); // Deletes the simple blue lines
                     const mats = getMagicMaterials();
-                    win.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
+                    win.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat)); // Creates the stencil mask
+
+                    // Create the blue outline around the mask
                     const outline = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({
                         color: COLOR_DEFAULT_ZONE, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.NotEqualStencilFunc, stencilZPass: THREE.KeepStencilOp
                     }));
                     win.setObject3D('outline', outline);
                     activeMasksCount++;
+
+                    // Update all entities with apply-magic-shader to apply the stencil mask
                     document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
                 }, PREVIEW_DURATION);
             }
@@ -159,6 +188,7 @@
             },
             spawn: function(hand, pos) {
                 const win = document.createElement('a-entity');
+                // Selects Geometry: Left Hand = Cone, Right Hand = Box
                 const geo = (hand === 'leftHand') ? new THREE.ConeGeometry(0.2, 0.4, 32) : new THREE.BoxGeometry(0.4, 0.3, 0.4);
                 
                 // Stage 1: Wireframe Preview (visible entity)
@@ -171,8 +201,8 @@
                 setTimeout(() => {
                     win.removeObject3D('preview');
                     const mats = getMagicMaterials();
-                    win.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
-                    win.setObject3D('outline', new THREE.Mesh(geo, mats.outlineMat));
+                    win.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat)); // Invisible volume
+                    win.setObject3D('outline', new THREE.Mesh(geo, mats.outlineMat)); // Visible outline
                     activeMasksCount++;
                     document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
                 }, PREVIEW_DURATION);
@@ -270,6 +300,7 @@
          * Logic: Quickly double pinch left hand (within 300ms) to create or delete (with right hand hold) objects.
          */
         AFRAME.registerComponent('general-interaction', {
+            // Handle quick double pinch to create or delete objects
             init: function () {
                 this.lastPinchTime = 0;
                 this.el.addEventListener('pinchstarted', (evt) => {
@@ -285,6 +316,7 @@
                     } else { this.lastPinchTime = now; }
                 });
             },
+            // Create a new object at the given position
             spawn: function(pos) {
                 const el = document.createElement(Math.random() < 0.5 ? 'a-box' : 'a-sphere');
                 el.setAttribute('position', pos);
@@ -295,11 +327,11 @@
                 this.el.sceneEl.appendChild(el);
             }
         });
-        // ---------------------------------------------------
 
 
         // ---------------------------------------------------
         // 4. SYSTEM CONTROL (Menu & UI Positioning)
+        // ---------------------------------------------------
         AFRAME.registerComponent('hub-controller', {
             init: function() {
                 const btns = document.querySelectorAll('.menu-btn');

@@ -26,9 +26,7 @@ Use the **Floating AR Menu** to switch between the following three modes. Each m
 
 ### 1. 2D Window Plane
 
-- **Creation**: Pinch **both hands simultaneously for 3 seconds**.
-
-- 
+- **Creation**: Pinch **both hands simultaneously for 3 seconds**. 
 
 ### 2. 3D Primitives
 
