@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="utf-8" />
-    <title>Magic Window Hub - Merge Overlap Fix</title>
+    <title>Magic Window Hub - Wireframe Preview</title>
     <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
     <style>body { margin: 0; overflow: hidden; }</style>
 
@@ -11,8 +11,9 @@
         window.DrawState = { enabled: false };
         let activeMasksCount = 0; 
         const ELEMENT_SIZE = 0.1;
-        const COLOR_DEFAULT_ZONE = '#0000FF'; 
+        const COLOR_DEFAULT_ZONE = '#007AFF'; 
 
+        // 受影响物体的着色器组件
         AFRAME.registerComponent('apply-magic-shader', {
             schema: { color: {type: 'color', default: '#FFFFFF'} },
             init: function() {
@@ -37,7 +38,8 @@
             }
         });
 
-        function getMagicMaterials(geometry) {
+        // 获取遮罩专用的材质组
+        function getMagicMaterials() {
             const maskMat = new THREE.MeshBasicMaterial({ 
                 colorWrite: false, 
                 depthWrite: false, 
@@ -73,7 +75,7 @@
             return !!(rh && rh.grabbedEl);
         };
 
-        // 2D Plane
+        // 模块 1: 2D Plane 逻辑
         AFRAME.registerComponent('logic-window-plane', {
             init: function() {
                 this.isL = false; this.isR = false;
@@ -93,30 +95,39 @@
             spawn: function(pos) {
                 const win = document.createElement('a-entity');
                 const geo = new THREE.PlaneGeometry(0.4, 0.3);
-                const mats = getMagicMaterials(geo);
-                win.setObject3D('mesh', new THREE.Mesh(geo, mats.maskMat));
                 
-                const outline = new THREE.LineSegments(
-                    new THREE.EdgesGeometry(geo), 
-                    new THREE.LineBasicMaterial({
-                        color: COLOR_DEFAULT_ZONE,
-                        stencilWrite: true, stencilRef: 1, 
-                        stencilFunc: THREE.NotEqualStencilFunc, 
-                        stencilZPass: THREE.KeepStencilOp
-                    })
+                const previewMesh = new THREE.LineSegments(
+                    new THREE.EdgesGeometry(geo),
+                    new THREE.LineBasicMaterial({ color: COLOR_DEFAULT_ZONE })
                 );
-                win.setObject3D('outline', outline);
+                win.setObject3D('preview', previewMesh);
                 
                 win.setAttribute('position', pos); win.setAttribute('grabbable', ''); win.classList.add('magic-window');
                 const cam = new THREE.Vector3(); document.getElementById('mainCamera').object3D.getWorldPosition(cam);
                 win.addEventListener('loaded', () => win.object3D.lookAt(cam));
                 this.el.sceneEl.appendChild(win);
-                activeMasksCount++;
-                document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+
+                setTimeout(() => {
+                    win.removeObject3D('preview');
+                    const mats = getMagicMaterials();
+                    win.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
+                    const outline = new THREE.LineSegments(
+                        new THREE.EdgesGeometry(geo), 
+                        new THREE.LineBasicMaterial({
+                            color: COLOR_DEFAULT_ZONE,
+                            stencilWrite: true, stencilRef: 1, 
+                            stencilFunc: THREE.NotEqualStencilFunc, 
+                            stencilZPass: THREE.KeepStencilOp
+                        })
+                    );
+                    win.setObject3D('outline', outline);
+                    activeMasksCount++;
+                    document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+                }, 1000);
             }
         });
 
-        // 3D Shapes (Cone & Box)
+        // 模块 2: 3D Shapes
         AFRAME.registerComponent('logic-3d-shapes', {
             init: function() {
                 this.ts = { leftHand: null, rightHand: null };
@@ -133,19 +144,36 @@
             spawn: function(hand, pos) {
                 const win = document.createElement('a-entity');
                 const geo = (hand === 'leftHand') ? new THREE.ConeGeometry(0.2, 0.4, 32) : new THREE.BoxGeometry(0.4, 0.3, 0.4);
-                const mats = getMagicMaterials(geo);
                 
-                win.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
-                win.setObject3D('outline', new THREE.Mesh(geo, mats.outlineMat));
+                // 使用 LineSegments 和 EdgesGeometry 来提取几何体的边缘
+                const edgeGeo = new THREE.EdgesGeometry(geo);
+                const previewLines = new THREE.LineSegments(
+                    edgeGeo, 
+                    new THREE.LineBasicMaterial({ color: COLOR_DEFAULT_ZONE })
+                );
+                win.setObject3D('preview', previewLines);
                 
-                win.setAttribute('position', pos); win.setAttribute('grabbable', ''); win.classList.add('magic-window');
+                win.setAttribute('position', pos); 
+                win.setAttribute('grabbable', ''); 
+                win.classList.add('magic-window');
                 this.el.sceneEl.appendChild(win);
-                activeMasksCount++;
-                document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+
+                setTimeout(() => {
+                    win.removeObject3D('preview'); // 移除线条预览
+                    const mats = getMagicMaterials();
+                    
+                    win.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
+                    win.setObject3D('outline', new THREE.Mesh(geo, mats.outlineMat));
+                    
+                    activeMasksCount++;
+                    document.querySelectorAll('[apply-magic-shader]').forEach(o => 
+                        o.components['apply-magic-shader'].updateStencil(true)
+                    );
+                }, 1000);
             }
         });
 
-        // Draw Any
+        // 模块 3: Draw Any 逻辑
         AFRAME.registerComponent('logic-draw-any', {
             init: function() {
                 this.lh = document.getElementById('leftHand');
@@ -198,27 +226,31 @@
                 const geo = new THREE.ShapeGeometry(shape);
                 const ent = document.createElement('a-entity');
                 
-                const mats = getMagicMaterials(geo);
-                ent.setObject3D('mesh', new THREE.Mesh(geo, mats.maskMat));
-                
                 const edgeGeo = new THREE.BufferGeometry().setFromPoints([...this.pts, this.pts[0]]);
-                const outline = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({
-                    color: COLOR_DEFAULT_ZONE,
-                    stencilWrite: true, stencilRef: 1, 
-                    stencilFunc: THREE.NotEqualStencilFunc, 
-                    stencilZPass: THREE.KeepStencilOp
-                }));
-                ent.setObject3D('outline', outline);
-                
+                const previewLines = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({color: COLOR_DEFAULT_ZONE}));
+                ent.setObject3D('preview', previewLines);
+
                 ent.setAttribute('position', this.org); ent.object3D.quaternion.copy(this.bQuat);
                 ent.setAttribute('grabbable', ''); ent.classList.add('magic-mask');
                 this.el.sceneEl.appendChild(ent);
-                activeMasksCount++;
-                document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+
+                setTimeout(() => {
+                    ent.removeObject3D('preview');
+                    const mats = getMagicMaterials();
+                    ent.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
+                    const outline = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({
+                        color: COLOR_DEFAULT_ZONE,
+                        stencilWrite: true, stencilRef: 1, 
+                        stencilFunc: THREE.NotEqualStencilFunc, 
+                        stencilZPass: THREE.KeepStencilOp
+                    }));
+                    ent.setObject3D('outline', outline);
+                    activeMasksCount++;
+                    document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+                }, 1000);
             }
         });
 
-        // General Interaction
         AFRAME.registerComponent('general-interaction', {
             init: function () {
                 this.lastPinchTime = 0;
@@ -266,8 +298,8 @@
             init: function() {
                 this.el.sceneEl.addEventListener('enter-vr', () => {
                     const cam = document.getElementById('mainCamera').object3D;
-                    const pos = new THREE.Vector3(0.3, 0, -0.6); 
-                    this.el.object3D.position.copy(pos.applyMatrix4(cam.matrixWorld));
+                    const offset = new THREE.Vector3(0.3, 0, -0.6); 
+                    this.el.object3D.position.copy(offset.applyMatrix4(cam.matrixWorld));
                     this.el.object3D.lookAt(cam.getWorldPosition(new THREE.Vector3()));
                 });
             }
