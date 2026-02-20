@@ -2,18 +2,33 @@
 <html>
 <head>
     <meta charset="utf-8" />
-    <title>Magic Window Hub - Wireframe Preview</title>
+    <title>Magic Window Hub - Global Timing Config</title>
     <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
     <style>body { margin: 0; overflow: hidden; }</style>
 
-    <script>
-        window.ActiveMode = 'none'; 
-        window.DrawState = { enabled: false };
-        let activeMasksCount = 0; 
-        const ELEMENT_SIZE = 0.1;
-        const COLOR_DEFAULT_ZONE = '#007AFF'; 
+        <script>
+        // ---------------------------------------------------
+        // 1. Global Parameters
+        const LONG_PINCH_DURATION = 2000; // Long-pinch duration for all interactions (2s)
+        const PREVIEW_DURATION = 1000;    // Duration for previewing the original geometry (1s)
+        const COLOR_DEFAULT_ZONE = '#007AFF'; // Primary UI and Wireframe color
+        const ELEMENT_SIZE = 0.1; // Base size for randomly spawned objects
 
-        // 受影响物体的着色器组件
+        // State Variables
+        window.ActiveMode = 'none'; // Current active module: 'plane', 'shapes', 'draw'
+        window.DrawState = { enabled: false }; // State for 'draw' module: enabled or disabled
+        let activeMasksCount = 0; // // Number of active "Magic Mask" in the scene
+        // ---------------------------------------------------
+        
+
+        // ---------------------------------------------------
+        // 2. CORE RENDERING COMPONENTS (Stencil Buffer Logic)
+
+        /**
+         * Component: apply-magic-shader
+         * Purpose: Attached to standard objects to make them hideable by "Magic Windows".
+         * Logic: Uses the Stencil Buffer. If a mask exists, the object only renders where the mask is NOT present.
+         */
         AFRAME.registerComponent('apply-magic-shader', {
             schema: { color: {type: 'color', default: '#FFFFFF'} },
             init: function() {
@@ -23,6 +38,7 @@
                     mesh.material = new THREE.MeshStandardMaterial({
                         color: new THREE.Color(this.data.color),
                         transparent: true, opacity: 1.0, stencilWrite: true, stencilRef: 1,
+                        // If masks exist, use NotEqualStencilFunc to hide parts overlapping the mask
                         stencilFunc: (activeMasksCount > 0) ? THREE.NotEqualStencilFunc : THREE.AlwaysStencilFunc,
                         stencilZPass: THREE.KeepStencilOp
                     });
@@ -30,6 +46,7 @@
                 if (this.el.getObject3D('mesh')) this.applyMat();
                 else this.el.addEventListener('model-loaded', this.applyMat);
             },
+            // Updates stencil logic when a mask is added or removed from the scene
             updateStencil: function(isActive) {
                 const mesh = this.el.getObject3D('mesh');
                 if (mesh && mesh.material) {
@@ -38,44 +55,44 @@
             }
         });
 
-        // 获取遮罩专用的材质组
+        /**
+         * Function: getMagicMaterials
+         * Purpose: Generates the two special materials needed for the Magic Window.
+         * 1. maskMat: Invisible material that "cuts a hole" by writing to the Stencil Buffer.
+         * 2. outlineMat: A shader material that renders a glowing border around the mask area.
+        */
         function getMagicMaterials() {
             const maskMat = new THREE.MeshBasicMaterial({ 
-                colorWrite: false, 
-                depthWrite: false, 
-                stencilWrite: true, 
-                stencilRef: 1, 
-                stencilFunc: THREE.AlwaysStencilFunc, 
-                stencilZPass: THREE.ReplaceStencilOp 
+                colorWrite: false, depthWrite: false, stencilWrite: true, 
+                stencilRef: 1, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp 
             });
-
             const outlineMat = new THREE.ShaderMaterial({
                 uniforms: { thickness: { value: 0.005 }, color: { value: new THREE.Color(COLOR_DEFAULT_ZONE) } },
                 vertexShader: `
                     uniform float thickness; 
-                    void main() { 
-                        vec3 pos = position + normal * thickness; 
-                        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0); 
-                    }`,
-                fragmentShader: `
-                    uniform vec3 color; 
-                    void main() { gl_FragColor = vec4(color, 1.0); }`,
-                side: THREE.BackSide, 
-                stencilWrite: true, 
-                stencilRef: 1, 
-                stencilFunc: THREE.NotEqualStencilFunc, 
-                stencilZPass: THREE.KeepStencilOp
+                    void main() { vec3 pos = position + normal * thickness; gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0); }`,
+                fragmentShader: `uniform vec3 color; void main() { gl_FragColor = vec4(color, 1.0); }`,
+                side: THREE.BackSide, stencilWrite: true, stencilRef: 1, 
+                stencilFunc: THREE.NotEqualStencilFunc, stencilZPass: THREE.KeepStencilOp
             });
-
             return { maskMat, outlineMat };
         }
 
+        // Helper: Check if the right hand is currently holding an object
         const isRightHandBusy = () => {
             const rh = document.getElementById('rightHand').components['hand-tracking-grab-controls'];
             return !!(rh && rh.grabbedEl);
         };
+        // ---------------------------------------------------
 
-        // 模块 1: 2D Plane 逻辑
+
+        // ---------------------------------------------------
+        // 3. INTERACTION MODULES (Logic for each Mode)
+
+        /**
+         * Mode A: 2D Plane
+         * Trigger: Pinch both hands simultaneously for 2s.
+         */
         AFRAME.registerComponent('logic-window-plane', {
             init: function() {
                 this.isL = false; this.isR = false;
@@ -84,7 +101,7 @@
                     if(window.ActiveMode !== 'plane' || isRightHandBusy()) return;
                     if(e.target.id === 'leftHand') { this.isL = true; this.lp = e.detail.position.clone(); }
                     if(e.target.id === 'rightHand') this.isR = true;
-                    if(this.isL && this.isR) this.timer = setTimeout(this.check, 3000);
+                    if(this.isL && this.isR) this.timer = setTimeout(this.check, LONG_PINCH_DURATION);
                 });
                 this.el.sceneEl.addEventListener('pinchended', (e) => {
                     if(e.target.id === 'leftHand') this.isL = false;
@@ -95,39 +112,36 @@
             spawn: function(pos) {
                 const win = document.createElement('a-entity');
                 const geo = new THREE.PlaneGeometry(0.4, 0.3);
-                
-                const previewMesh = new THREE.LineSegments(
-                    new THREE.EdgesGeometry(geo),
-                    new THREE.LineBasicMaterial({ color: COLOR_DEFAULT_ZONE })
-                );
-                win.setObject3D('preview', previewMesh);
-                
+
+                // Stage 1: Wireframe Preview
+                const previewLines = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: COLOR_DEFAULT_ZONE }));
+                win.setObject3D('preview', previewLines);
                 win.setAttribute('position', pos); win.setAttribute('grabbable', ''); win.classList.add('magic-window');
+                
+                // Orient towards camera on spawn
                 const cam = new THREE.Vector3(); document.getElementById('mainCamera').object3D.getWorldPosition(cam);
                 win.addEventListener('loaded', () => win.object3D.lookAt(cam));
                 this.el.sceneEl.appendChild(win);
 
+                // Stage 2: Conversion to Stencil Mask after preview timeout
                 setTimeout(() => {
                     win.removeObject3D('preview');
                     const mats = getMagicMaterials();
                     win.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
-                    const outline = new THREE.LineSegments(
-                        new THREE.EdgesGeometry(geo), 
-                        new THREE.LineBasicMaterial({
-                            color: COLOR_DEFAULT_ZONE,
-                            stencilWrite: true, stencilRef: 1, 
-                            stencilFunc: THREE.NotEqualStencilFunc, 
-                            stencilZPass: THREE.KeepStencilOp
-                        })
-                    );
+                    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({
+                        color: COLOR_DEFAULT_ZONE, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.NotEqualStencilFunc, stencilZPass: THREE.KeepStencilOp
+                    }));
                     win.setObject3D('outline', outline);
                     activeMasksCount++;
                     document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
-                }, 1000);
+                }, PREVIEW_DURATION);
             }
         });
 
-        // 模块 2: 3D Shapes
+        /**
+         * Mode B: 3D Shapes
+         * Trigger: Left hand pinch 2s -> Cone, Right hand pinch 2s -> Box.
+         */
         AFRAME.registerComponent('logic-3d-shapes', {
             init: function() {
                 this.ts = { leftHand: null, rightHand: null };
@@ -135,7 +149,9 @@
                     const el = document.getElementById(id);
                     el.addEventListener('pinchstarted', (evt) => {
                         if(window.ActiveMode !== 'shapes' || isRightHandBusy()) return;
-                        this.ts[id] = setTimeout(() => { if(!isRightHandBusy()) this.spawn(id, evt.detail.position); }, 3000);
+                        this.ts[id] = setTimeout(() => { 
+                            if(!isRightHandBusy()) this.spawn(id, evt.detail.position); 
+                        }, LONG_PINCH_DURATION);
                     });
                     el.addEventListener('pinchended', () => clearTimeout(this.ts[id]));
                 };
@@ -145,55 +161,53 @@
                 const win = document.createElement('a-entity');
                 const geo = (hand === 'leftHand') ? new THREE.ConeGeometry(0.2, 0.4, 32) : new THREE.BoxGeometry(0.4, 0.3, 0.4);
                 
-                // 使用 LineSegments 和 EdgesGeometry 来提取几何体的边缘
-                const edgeGeo = new THREE.EdgesGeometry(geo);
-                const previewLines = new THREE.LineSegments(
-                    edgeGeo, 
-                    new THREE.LineBasicMaterial({ color: COLOR_DEFAULT_ZONE })
-                );
+                // Stage 1: Wireframe Preview (visible entity)
+                const previewLines = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: COLOR_DEFAULT_ZONE }));
                 win.setObject3D('preview', previewLines);
-                
-                win.setAttribute('position', pos); 
-                win.setAttribute('grabbable', ''); 
-                win.classList.add('magic-window');
+                win.setAttribute('position', pos); win.setAttribute('grabbable', ''); win.classList.add('magic-window');
                 this.el.sceneEl.appendChild(win);
 
+                // Stage 2: Morph into Stencil Mask (invisible volume that hides objects)
                 setTimeout(() => {
-                    win.removeObject3D('preview'); // 移除线条预览
+                    win.removeObject3D('preview');
                     const mats = getMagicMaterials();
-                    
                     win.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
                     win.setObject3D('outline', new THREE.Mesh(geo, mats.outlineMat));
-                    
                     activeMasksCount++;
-                    document.querySelectorAll('[apply-magic-shader]').forEach(o => 
-                        o.components['apply-magic-shader'].updateStencil(true)
-                    );
-                }, 1000);
+                    document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+                }, PREVIEW_DURATION);
             }
         });
 
-        // 模块 3: Draw Any 逻辑
+        /**
+         * Mode C: Draw Any
+         * Trigger: Left hand pinch 2s to start drawing mode, right hand pinch to draw.
+         */
         AFRAME.registerComponent('logic-draw-any', {
             init: function() {
                 this.lh = document.getElementById('leftHand');
                 this.rh = document.getElementById('rightHand');
+
+                // Activation logic
                 this.lh.addEventListener('pinchstarted', () => {
                     if(window.ActiveMode !== 'draw' || isRightHandBusy()) return;
                     this.timer = setTimeout(() => { 
                         window.DrawState.enabled = true;
                         this.rh.setAttribute('hand-tracking-grab-controls', 'enabled', false);
                         document.querySelector('#modeText').setAttribute('value', 'DRAWING: ON');
-                    }, 3000);
+                    }, LONG_PINCH_DURATION);
                 });
                 this.lh.addEventListener('pinchended', () => clearTimeout(this.timer));
 
+                // Drawing logic (Tracking the path)
                 this.rh.addEventListener('pinchstarted', (e) => {
                     if(!window.DrawState.enabled) return;
                     this.pts = []; this.org = e.detail.position.clone();
                     const camObj = this.el.sceneEl.camera.el.object3D;
                     this.bQuat = camObj.quaternion.clone();
                     this.iQuat = this.bQuat.clone().invert();
+
+                    // Temp line entity to visualize drawing
                     this.lineGeo = new THREE.BufferGeometry();
                     this.lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9000), 3));
                     this.lineEnt = document.createElement('a-entity');
@@ -219,38 +233,42 @@
                     document.querySelector('#modeText').setAttribute('value', 'Active: DRAW ANY');
                 });
             },
+
+            // Generate a filled 2D shape from the hand-drawn points
             createMask: function() {
                 if(this.pts.length < 3) return;
                 const shape = new THREE.Shape(); shape.moveTo(this.pts[0].x, this.pts[0].y);
                 this.pts.forEach(p => shape.lineTo(p.x, p.y));
                 const geo = new THREE.ShapeGeometry(shape);
                 const ent = document.createElement('a-entity');
-                
+
+                // Wireframe Preview
                 const edgeGeo = new THREE.BufferGeometry().setFromPoints([...this.pts, this.pts[0]]);
                 const previewLines = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({color: COLOR_DEFAULT_ZONE}));
                 ent.setObject3D('preview', previewLines);
-
                 ent.setAttribute('position', this.org); ent.object3D.quaternion.copy(this.bQuat);
                 ent.setAttribute('grabbable', ''); ent.classList.add('magic-mask');
                 this.el.sceneEl.appendChild(ent);
 
+                // Convert to Mask
                 setTimeout(() => {
                     ent.removeObject3D('preview');
                     const mats = getMagicMaterials();
                     ent.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
                     const outline = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({
-                        color: COLOR_DEFAULT_ZONE,
-                        stencilWrite: true, stencilRef: 1, 
-                        stencilFunc: THREE.NotEqualStencilFunc, 
-                        stencilZPass: THREE.KeepStencilOp
+                        color: COLOR_DEFAULT_ZONE, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.NotEqualStencilFunc, stencilZPass: THREE.KeepStencilOp
                     }));
                     ent.setObject3D('outline', outline);
                     activeMasksCount++;
                     document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
-                }, 1000);
+                }, PREVIEW_DURATION);
             }
         });
 
+        /**
+         * General Interaction: create, delete objects
+         * Logic: Quickly double pinch left hand (within 300ms) to create or delete (with right hand hold) objects.
+         */
         AFRAME.registerComponent('general-interaction', {
             init: function () {
                 this.lastPinchTime = 0;
@@ -261,8 +279,8 @@
                         const rhGrab = document.getElementById('rightHand').components['hand-tracking-grab-controls'];
                         const grabbed = rhGrab ? rhGrab.grabbedEl : null;
                         if (grabbed && !grabbed.classList.contains('magic-window') && !grabbed.classList.contains('magic-mask')) {
-                            grabbed.parentNode.removeChild(grabbed);
-                        } else { this.spawn(evt.detail.position); }
+                            grabbed.parentNode.removeChild(grabbed); // Delete object if held in right hand
+                        } else { this.spawn(evt.detail.position); } // Create new object if not held
                         this.lastPinchTime = 0;
                     } else { this.lastPinchTime = now; }
                 });
@@ -277,15 +295,23 @@
                 this.el.sceneEl.appendChild(el);
             }
         });
+        // ---------------------------------------------------
 
+
+        // ---------------------------------------------------
+        // 4. SYSTEM CONTROL (Menu & UI Positioning)
         AFRAME.registerComponent('hub-controller', {
             init: function() {
                 const btns = document.querySelectorAll('.menu-btn');
                 btns.forEach(btn => {
                     btn.addEventListener('click', () => {
                         window.ActiveMode = btn.id.replace('btn-', '');
+                        
+                        // Visual Feedback for Menu
                         btns.forEach(b => b.setAttribute('color', '#333')); btn.setAttribute('color', '#007AFF');
                         document.querySelector('#modeText').setAttribute('value', 'Active: ' + window.ActiveMode.toUpperCase());
+                        
+                        // Clear all existing masks when switching modes
                         document.querySelectorAll('.magic-window, .magic-mask').forEach(el => el.parentNode.removeChild(el));
                         activeMasksCount = 0;
                         document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(false));
@@ -294,6 +320,7 @@
             }
         });
 
+        // Ensure menu create in front of the player upon entering AR
         AFRAME.registerComponent('menu-spawner', {
             init: function() {
                 this.el.sceneEl.addEventListener('enter-vr', () => {
@@ -312,7 +339,6 @@
             <a-cursor position="0 0 -0.7" fuse="false" raycaster="objects: .menu-btn" color="#007AFF"></a-cursor>
             <a-text id="modeText" value="Select a Module" position="0 0.3 -0.8" align="center" scale="0.2"></a-text>
         </a-camera>
-
         <a-entity id="menu-panel" menu-spawner hub-controller position="0.3 1.5 -0.6">
             <a-plane color="#222" width="0.3" height="0.4" opacity="0.9">
                 <a-text value="MAGIC HUB" align="center" position="0 0.15 0.01" scale="0.18 0.18 0.18"></a-text>
@@ -321,10 +347,8 @@
                 <a-plane id="btn-draw" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 -0.09 0.02"><a-text value="Draw Any" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
             </a-plane>
         </a-entity>
-
         <a-entity id="leftHand" hand-tracking-controls="hand: left" general-interaction logic-window-plane logic-3d-shapes logic-draw-any></a-entity>
         <a-entity id="rightHand" hand-tracking-controls="hand: right" hand-tracking-grab-controls="hand: right" general-interaction></a-entity>
-
         <a-sphere position="0 1.2 -0.8" radius="0.1" apply-magic-shader="color: #00FF00" grabbable></a-sphere>
         <a-box position="0.3 1.2 -0.8" scale="0.15 0.15 0.15" apply-magic-shader="color: #FF0000" grabbable></a-box>
     </a-scene>
