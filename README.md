@@ -26,21 +26,21 @@ Use the **Floating AR Menu** to switch between the following three modes. Each m
 
 ### 1. 2D Window Plane
 
-- **Creation**: Pinch **both hands simultaneously for 3 seconds**. 
+- **Creation**: Pinch **both hands simultaneously for 2 seconds**. 
 
 ### 2. 3D Primitives
 
 - **Creation**:
   
-  - **Left Hand Pinch (3s)**: Generates a 3D **Cone** mask.
+  - **Left Hand Pinch (2s)**: Generates a 3D **Cone** mask.
   
-  - **Right Hand Pinch (3s)**: Generates a 3D **Box** mask.
+  - **Right Hand Pinch (2s)**: Generates a 3D **Box** mask.
 
 ### 3. Draw Any Polygon
 
 - **Creation**:
   
-  1. Hold **Left Hand Pinch for 3 seconds** to enable "Drawing Mode".
+  1. Hold **Left Hand Pinch for 2 seconds** to enable "Drawing Mode".
   
   2. Pinch and move your **Right Hand** to trace a path in the air (a blue line will follow your hand).
   
