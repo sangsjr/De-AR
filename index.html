@@ -371,10 +371,10 @@
         /**
          * Mode 4: Smart Draw (Intelligent Shape Recognition and 2D -> 3D)
          * Trigger:
-         *     - Draw: Left hand pinch 2s to start drawing mode, right hand pinch to draw.
-         *     - Auto detect circle, rectangle, and triangle, other shapes remain unchanged.
-         *     - 2D -> 3D: Move the circle, rectangle, and triangl 50 cm away.
-         *     - Circle -> Sphere, Rectangle -> Cuboid, Triangl -> Cone.
+         * - Draw: Left hand pinch 2s to start drawing mode, right hand pinch to draw.
+         * - Auto detect circle, rectangle, and triangle, other shapes remain unchanged.
+         * - 2D -> 3D: Move the circle, rectangle, and triangl 50 cm away.
+         * - Circle -> Sphere, Rectangle -> Cuboid, Triangl -> Cone.
          */
         AFRAME.registerComponent('logic-smart-draw', {
             init: function() {
@@ -684,6 +684,7 @@
                 const createRaycasterEntity = (handName) => {
                     const rayEl = document.createElement('a-entity');
                     rayEl.setAttribute('hand-ray-sync', `hand: ${handName}`); 
+                    // No longer need the showLine attribute, it becomes an invisible button detector
                     rayEl.setAttribute('raycaster', 'objects: .menu-btn;');
                     this.el.sceneEl.appendChild(rayEl);
                     return rayEl;
@@ -699,6 +700,7 @@
             // Use tick to detect distance per frame
             // Implement spatial click effect
             tick: function(time, timeDelta) {
+                // Spatial click judgment
                 // If in cooling state, reduce cooling time
                 if (this.cooldown > 0) {
                     this.cooldown -= timeDelta;
@@ -717,7 +719,8 @@
                     // If the ray passed through the menu button
                     if (hitEl && hitEl.classList.contains('menu-btn')) {
                         // Click the detection threshold: 3 cm
-                        // If it is less than this distance, it is judged that the fingertip clicked the button
+                        
+                        // If it is less than this distance, it is judged that the fingertip clicked the button!
                         if (distance < 0.03) {
                             if (this.lastHitBtn !== hitEl) {
                                 this.selectMenu(hitEl);
@@ -765,8 +768,10 @@
         <a-camera id="mainCamera">
             <a-text id="modeText" value="Select a Module" position="0 0.3 -0.8" align="center" scale="0.2"></a-text>
         </a-camera>
-        <a-entity id="menu-panel" menu-spawner hub-controller position="0.3 1.5 -0.6" scale="0.75 0.75 0.75">
-            <a-plane color="#222" width="0.3" height="0.48" opacity="0.9"> <a-text value="MAGIC HUB" align="center" position="0 0.19 0.01" scale="0.18 0.18 0.18"></a-text>
+        
+        <a-entity id="menu-panel" menu-spawner hub-controller position="0.3 1.5 -0.6" scale="0.75 0.75 0.75" grabbable>
+            <a-plane color="#222" width="0.3" height="0.48" opacity="0.9"> 
+                <a-text value="MAGIC HUB" align="center" position="0 0.19 0.01" scale="0.18 0.18 0.18"></a-text>
                 <a-plane id="btn-plane" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 0.11 0.02"><a-text value="2D Window" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
                 <a-plane id="btn-shapes" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 0.03 0.02"><a-text value="3D Shapes" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
                 <a-plane id="btn-draw" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 -0.05 0.02"><a-text value="Draw Any" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
