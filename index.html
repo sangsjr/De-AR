@@ -14,7 +14,6 @@
         const PREVIEW_DURATION = 1000;    // Duration for previewing the original geometry (1s)
         const COLOR_DEFAULT_ZONE = '#007AFF'; // Primary UI and Wireframe color
         const ELEMENT_SIZE = 0.1; // Base size for randomly spawned objects
-        const RAY_VISIBLE_DISTANCE = 0.2; // Display rays within 20cm of the menu
 
         // State Variables
         window.ActiveMode = 'none'; // Current active module: 'plane', 'shapes', 'draw'
@@ -306,7 +305,7 @@
 
                 // Drawing logic (Tracking the path)
                 this.rh.addEventListener('pinchstarted', (e) => {
-                    if(!window.DrawState.enabled) return;
+                    if(!window.DrawState.enabled || window.ActiveMode !== 'draw') return;
                     this.pts = []; this.org = e.detail.position.clone();
                     const camObj = this.el.sceneEl.camera.el.object3D;
                     this.bQuat = camObj.quaternion.clone();
@@ -370,6 +369,264 @@
         });
 
         /**
+         * Mode 4: Smart Draw (Intelligent Shape Recognition and 2D -> 3D)
+         * Trigger:
+         *     - Draw: Left hand pinch 2s to start drawing mode, right hand pinch to draw.
+         *     - Auto detect circle, rectangle, and triangle, other shapes remain unchanged.
+         *     - 2D -> 3D: Move the circle, rectangle, and triangl 50 cm away.
+         *     - Circle -> Sphere, Rectangle -> Cuboid, Triangl -> Cone.
+         */
+        AFRAME.registerComponent('logic-smart-draw', {
+            init: function() {
+                this.lh = document.getElementById('leftHand');
+                this.rh = document.getElementById('rightHand');
+
+                // Activation logic: Left hand pinch for 2s to start smart draw mode
+                this.lh.addEventListener('pinchstarted', () => {
+                    if(window.ActiveMode !== 'smart' || isRightHandBusy()) return;
+                    this.timer = setTimeout(() => { 
+                        window.DrawState.enabled = true;
+                        this.rh.setAttribute('hand-tracking-grab-controls', 'enabled', false);
+                        document.querySelector('#modeText').setAttribute('value', 'SMART DRAW: ON');
+                    }, LONG_PINCH_DURATION);
+                });
+                this.lh.addEventListener('pinchended', () => clearTimeout(this.timer));
+
+                // Drawing logic: Right hand pinch to track path, projected onto a 2D plane
+                this.rh.addEventListener('pinchstarted', (e) => {
+                    if(!window.DrawState.enabled || window.ActiveMode !== 'smart') return;
+                    this.pts = []; this.org = e.detail.position.clone();
+                    const camObj = this.el.sceneEl.camera.el.object3D;
+                    this.bQuat = camObj.quaternion.clone();
+                    this.iQuat = this.bQuat.clone().invert();
+
+                    this.lineGeo = new THREE.BufferGeometry();
+                    this.lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(9000), 3));
+                    this.lineEnt = document.createElement('a-entity');
+                    this.lineEnt.setObject3D('mesh', new THREE.Line(this.lineGeo, new THREE.LineBasicMaterial({color: COLOR_DEFAULT_ZONE})));
+                    this.lineEnt.object3D.position.copy(this.org);
+                    this.lineEnt.object3D.quaternion.copy(this.bQuat);
+                    this.el.sceneEl.appendChild(this.lineEnt);
+                    this.isDraw = true;
+                });
+                this.rh.addEventListener('pinchmoved', (e) => {
+                    if(!this.isDraw) return;
+                    const p = e.detail.position.clone().sub(this.org).applyQuaternion(this.iQuat);
+                    this.pts.push(p);
+                    const attr = this.lineGeo.attributes.position;
+                    attr.setXYZ(this.pts.length-1, p.x, p.y, p.z); attr.needsUpdate = true;
+                    this.lineGeo.setDrawRange(0, this.pts.length);
+                });
+                this.rh.addEventListener('pinchended', () => {
+                    if(!this.isDraw) return;
+                    this.createSmartMask(); 
+                    this.el.sceneEl.removeChild(this.lineEnt);
+                    this.isDraw = false; window.DrawState.enabled = false;
+                    this.rh.setAttribute('hand-tracking-grab-controls', 'enabled', true);
+                    document.querySelector('#modeText').setAttribute('value', 'Active: SMART DRAW');
+                });
+            },
+
+            createSmartMask: function() {
+                if(this.pts.length < 3) return;
+
+                // Algorithm core: Calculate area and perimeter, use Isoperimetric Quotient for smart classification
+                let area = 0;
+                let perimeter = 0;
+                let minX = Infinity, maxX = -Infinity;
+                let minY = Infinity, maxY = -Infinity;
+
+                for (let i = 0; i < this.pts.length; i++) {
+                    const p1 = this.pts[i];
+                    const p2 = this.pts[(i + 1) % this.pts.length];
+                    
+                    // Cross product to calculate polygon area
+                    area += (p1.x * p2.y - p2.x * p1.y);
+                    
+                    // Accumulate to calculate perimeter
+                    perimeter += p1.distanceTo(p2);
+
+                    // Record bounding box to generate perfect shape dimensions and center point
+                    if (p1.x < minX) minX = p1.x;
+                    if (p1.x > maxX) maxX = p1.x;
+                    if (p1.y < minY) minY = p1.y;
+                    if (p1.y > maxY) maxY = p1.y;
+                }
+                area = Math.abs(area / 2);
+
+                // Shape factor Q = P^2 / A
+                const Q = (area === 0) ? Infinity : (perimeter * perimeter) / area;
+                
+                const centerX = (minX + maxX) / 2;
+                const centerY = (minY + maxY) / 2;
+                const width = maxX - minX;
+                const height = maxY - minY;
+                const radius = Math.max(width, height) / 2;
+
+                let geo;
+                let isSmartShape = false;
+                let shapeType = '';
+
+                // Judgment logic: Differentiate circle, rectangle, and triangle based on Q value intervals
+                if (Q > 11 && Q < 14.5) {
+                    geo = new THREE.CircleGeometry(radius, 32);
+                    geo.translate(centerX, centerY, 0);
+                    isSmartShape = true;
+                    shapeType = 'circle';
+                } else if (Q >= 14.5 && Q <= 19) {
+                    geo = new THREE.PlaneGeometry(width, height);
+                    geo.translate(centerX, centerY, 0);
+                    isSmartShape = true;
+                    shapeType = 'rectangle';
+                } else if (Q > 19 && Q <= 25) {
+                    geo = new THREE.CircleGeometry(radius, 3);
+                    geo.rotateZ(Math.PI / 2); 
+                    geo.translate(centerX, centerY, 0);
+                    isSmartShape = true;
+                    shapeType = 'triangle';
+                }
+
+                // Fallback protection: If not one of the above three shapes, keep the original hand-drawn path
+                if (!isSmartShape) {
+                    const shape = new THREE.Shape(); 
+                    shape.moveTo(this.pts[0].x, this.pts[0].y);
+                    this.pts.forEach(p => shape.lineTo(p.x, p.y));
+                    geo = new THREE.ShapeGeometry(shape);
+                }
+
+                const ent = document.createElement('a-entity');
+                
+                // Wireframe processing: EdgesGeometry for smart shapes, keep original for hand-drawn
+                let edgeGeo, finalOutline;
+                if (isSmartShape) {
+                    edgeGeo = new THREE.EdgesGeometry(geo);
+                    finalOutline = new THREE.LineSegments(edgeGeo, new THREE.LineBasicMaterial({
+                        color: COLOR_DEFAULT_ZONE, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.NotEqualStencilFunc, stencilZPass: THREE.KeepStencilOp
+                    }));
+                } else {
+                    edgeGeo = new THREE.BufferGeometry().setFromPoints([...this.pts, this.pts[0]]);
+                    finalOutline = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({
+                        color: COLOR_DEFAULT_ZONE, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.NotEqualStencilFunc, stencilZPass: THREE.KeepStencilOp
+                    }));
+                }
+                
+                const mats = getMagicMaterials();
+                ent.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
+                ent.setObject3D('outline', finalOutline);
+                
+                ent.setAttribute('position', this.org); 
+                ent.object3D.quaternion.copy(this.bQuat);
+                ent.setAttribute('grabbable', ''); 
+                ent.classList.add('magic-mask');
+                
+                // Tag the smartly recognized regular shapes and attach the 3D deformation monitoring component
+                if (isSmartShape) {
+                    ent.setAttribute('smart-morphable', `type: ${shapeType}; width: ${width}; height: ${height}; radius: ${radius}; cx: ${centerX}; cy: ${centerY}`);
+                }
+
+                this.el.sceneEl.appendChild(ent);
+                activeMasksCount++;
+                document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+            }
+        });
+
+        // Distance sensing 2D -> 3D morphing
+        AFRAME.registerComponent('smart-morphable', {
+            schema: {
+                type: {type: 'string'},
+                width: {type: 'number'},
+                height: {type: 'number'},
+                radius: {type: 'number'},
+                cx: {type: 'number'},
+                cy: {type: 'number'}
+            },
+            init: function() {
+                this.morphed = false;
+                this.startMoving = false;
+                this.initialObjPos = new THREE.Vector3();
+                this.referenceCamPos = new THREE.Vector3();
+                
+                // Delay a bit to get the world coordinates, ensuring the object is properly initialized in the scene
+                setTimeout(() => {
+                    this.el.object3D.getWorldPosition(this.initialObjPos);
+                }, 100);
+            },
+            tick: function() {
+                if (this.morphed) return;
+                // If the initial position is not yet obtained, skip calculation for now
+                if (!this.initialObjPos || this.initialObjPos.length() === 0) return;
+
+                const currentObjPos = new THREE.Vector3();
+                this.el.object3D.getWorldPosition(currentObjPos);
+
+                // 1. Check if the object is "pushed away" (deviates from birth point by more than 2cm)
+                if (!this.startMoving) {
+                    if (currentObjPos.distanceTo(this.initialObjPos) > 0.02) {
+                        this.startMoving = true;
+                        // Lock the physical position of the main camera at this moment
+                        const camObj = document.getElementById('mainCamera').object3D;
+                        camObj.getWorldPosition(this.referenceCamPos);
+                    }
+                    return;
+                }
+
+                // 2. Continuously check the distance between the object's current position and the "locked camera position"
+                // Trigger 3D transformation immediately if it exceeds 50cm
+                if (currentObjPos.distanceTo(this.referenceCamPos) > 0.5) {
+                    this.morphTo3D();
+                }
+            },
+            morphTo3D: function() {
+                this.morphed = true;
+                let geo3D;
+                const t = this.data.type;
+                const cx = this.data.cx;
+                const cy = this.data.cy;
+
+                // Generate corresponding 3D geometries for different shapes
+                // Sphere
+                if (t === 'circle') {
+                    geo3D = new THREE.SphereGeometry(this.data.radius, 32, 16);
+                } else if (t === 'rectangle') {
+                    // Box
+                    const depth = Math.min(this.data.width, this.data.height);
+                    geo3D = new THREE.BoxGeometry(this.data.width, this.data.height, depth);
+                } else if (t === 'triangle') {
+                    // Cone
+                    geo3D = new THREE.ConeGeometry(this.data.radius, this.data.radius * 2, 32);
+                }
+
+                if (geo3D) {
+                    // Restore the 3D geometry's center offset to the hand-drawn center to prevent "teleporting"
+                    geo3D.translate(cx, cy, 0);
+                    
+                    // Stage 1: Strip the old 2D wireframe and 2D Plane Mask, temporarily reducing active mask count
+                    this.el.removeObject3D('mask');
+                    this.el.removeObject3D('outline');
+                    activeMasksCount--;
+                    document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(activeMasksCount > 0));
+
+                    // Show 3D wireframe preview for 1 second
+                    const previewLines = new THREE.LineSegments(new THREE.EdgesGeometry(geo3D), new THREE.LineBasicMaterial({ color: COLOR_DEFAULT_ZONE }));
+                    this.el.setObject3D('preview', previewLines);
+
+                    // Stage 2: After 1 second countdown, transform into a 3D magic mask
+                    setTimeout(() => {
+                        this.el.removeObject3D('preview');
+                        const mats = getMagicMaterials();
+                        
+                        this.el.setObject3D('mask', new THREE.Mesh(geo3D, mats.maskMat));
+                        this.el.setObject3D('outline', new THREE.Mesh(geo3D, mats.outlineMat));
+                        
+                        // Re-add to mask count
+                        activeMasksCount++; 
+                        document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
+                    }, PREVIEW_DURATION);
+                }
+            }
+        });
+
+        /**
          * General Interaction: create, delete objects
          * Logic: Quickly double pinch left hand (within 300ms) to create or delete (with right hand hold) objects.
          */
@@ -427,7 +684,7 @@
                 const createRaycasterEntity = (handName) => {
                     const rayEl = document.createElement('a-entity');
                     rayEl.setAttribute('hand-ray-sync', `hand: ${handName}`); 
-                    rayEl.setAttribute('raycaster', 'objects: .menu-btn; showLine: true; lineColor: #007AFF;');
+                    rayEl.setAttribute('raycaster', 'objects: .menu-btn;');
                     this.el.sceneEl.appendChild(rayEl);
                     return rayEl;
                 };
@@ -440,25 +697,8 @@
             },
             
             // Use tick to detect distance per frame
-            // Implement dynamic ray and click effect
+            // Implement spatial click effect
             tick: function(time, timeDelta) {
-                // 1. Dynamic ray visibility (based on global variable distance)
-                const menuEl = document.getElementById('menu-panel');
-                if (menuEl && this.rightRay) {
-                    const menuPos = new THREE.Vector3();
-                    menuEl.object3D.getWorldPosition(menuPos);
-                    const handPos = new THREE.Vector3();
-                    this.rightRay.object3D.getWorldPosition(handPos);
-                    
-                    // Determine whether to display the ray
-                    const isNear = handPos.distanceTo(menuPos) < RAY_VISIBLE_DISTANCE;
-                    if (this.rightRay.hasAttribute('line')) {
-                        // Setting transparency to control visibility
-                        this.rightRay.setAttribute('line', 'opacity', isNear ? 1 : 0);
-                    }
-                }
-
-                // 2. Spatial click judgment
                 // If in cooling state, reduce cooling time
                 if (this.cooldown > 0) {
                     this.cooldown -= timeDelta;
@@ -470,17 +710,21 @@
                 // Ensure that raycaster is running and has intersections
                 if (raycaster && raycaster.intersections && raycaster.intersections.length > 0) {
                     const hitEl = raycaster.intersectedEls[0];
-                    const distance = raycaster.intersections[0].distance; // The exact distance from fingertip to button
+                    
+                    // The exact distance from fingertip to button
+                    const distance = raycaster.intersections[0].distance; 
 
                     // If the ray passed through the menu button
                     if (hitEl && hitEl.classList.contains('menu-btn')) {
                         // Click the detection threshold: 3 cm
-                        // If it is less than this distance, it is judged that the fingertip clicked the button!
+                        // If it is less than this distance, it is judged that the fingertip clicked the button
                         if (distance < 0.03) {
                             if (this.lastHitBtn !== hitEl) {
                                 this.selectMenu(hitEl);
                                 this.lastHitBtn = hitEl;
-                                this.cooldown = 1000; // Click cooldown: locked for 1 second after a successful select
+                                
+                                // Click cooldown: locked for 1 second after a successful select
+                                this.cooldown = 1000; 
                             }
                         } else {
                             // If the distance is greater than 3cm, you can prepare for the next click.
@@ -500,7 +744,7 @@
                 this.el.sceneEl.addEventListener('enter-vr', () => {
                     const camObj = document.getElementById('mainCamera').object3D;
                     // Menu location
-                    const offset = new THREE.Vector3(0.3, -0.8, -0.5); 
+                    const offset = new THREE.Vector3(0.4, -0.9, -0.5); 
                     this.el.object3D.position.copy(offset.applyMatrix4(camObj.matrixWorld));
                     
                     // Raise around the X axis -60 degrees
@@ -521,15 +765,15 @@
         <a-camera id="mainCamera">
             <a-text id="modeText" value="Select a Module" position="0 0.3 -0.8" align="center" scale="0.2"></a-text>
         </a-camera>
-        <a-entity id="menu-panel" menu-spawner hub-controller position="0.3 1.5 -0.6">
-            <a-plane color="#222" width="0.3" height="0.4" opacity="0.9">
-                <a-text value="MAGIC HUB" align="center" position="0 0.15 0.01" scale="0.18 0.18 0.18"></a-text>
-                <a-plane id="btn-plane" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 0.07 0.02"><a-text value="2D Window" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
-                <a-plane id="btn-shapes" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 -0.01 0.02"><a-text value="3D Shapes" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
-                <a-plane id="btn-draw" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 -0.09 0.02"><a-text value="Draw Any" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
+        <a-entity id="menu-panel" menu-spawner hub-controller position="0.3 1.5 -0.6" scale="0.75 0.75 0.75">
+            <a-plane color="#222" width="0.3" height="0.48" opacity="0.9"> <a-text value="MAGIC HUB" align="center" position="0 0.19 0.01" scale="0.18 0.18 0.18"></a-text>
+                <a-plane id="btn-plane" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 0.11 0.02"><a-text value="2D Window" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
+                <a-plane id="btn-shapes" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 0.03 0.02"><a-text value="3D Shapes" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
+                <a-plane id="btn-draw" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 -0.05 0.02"><a-text value="Draw Any" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
+                <a-plane id="btn-smart" class="menu-btn" color="#333" width="0.24" height="0.06" position="0 -0.13 0.02"><a-text value="Smart Draw" align="center" scale="0.1 0.1 0.1"></a-text></a-plane>
             </a-plane>
         </a-entity>
-        <a-entity id="leftHand" hand-tracking-controls="hand: left" general-interaction logic-window-plane logic-3d-shapes logic-draw-any></a-entity>
+        <a-entity id="leftHand" hand-tracking-controls="hand: left" general-interaction logic-window-plane logic-3d-shapes logic-draw-any logic-smart-draw></a-entity>
         <a-entity id="rightHand" hand-tracking-controls="hand: right" hand-tracking-grab-controls="hand: right" general-interaction></a-entity>
         <a-sphere position="0 1.2 -0.8" radius="0.1" apply-magic-shader="color: #00FF00" grabbable></a-sphere>
         <a-box position="0.3 1.2 -0.8" scale="0.15 0.15 0.15" apply-magic-shader="color: #FF0000" grabbable></a-box>
