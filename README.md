@@ -61,3 +61,16 @@ Use the **Floating AR Menu** to switch between the following three modes. Each m
   2. Pinch and move your **Right Hand** to trace a path in the air (a blue line will follow your hand).
   
   3. Release the Right Hand to close the loop and generate a custom polygonal mask.
+
+### 4. Smart Draw
+
+- **Creation & Auto-Detection**:
+  
+  1. Hold **Left Hand Pinch for 2 seconds** to enable "Smart Draw Mode".
+  2. Pinch and move your **Right Hand** to trace a rough shape in the air.
+  3. Release the Right Hand to finish. The system will mathematically analyze your sketch and instantly snap it into a perfect 2D **Circle, Rectangle, or Triangle** (complex or unrecognized shapes will remain as custom polygons).
+
+- **Spatial Morphing (2D to 3D)**:
+  
+  - Grab any recognized 2D shape and push it away from you.
+  - Once the shape is moved **50 cm away** from the camera's original position, the 2D plane will magically inflate into a 1:1 3D volumetric mask (**Circle $\rightarrow$ Sphere, Rectangle $\rightarrow$ Box, Triangle $\rightarrow$ Cone**).
