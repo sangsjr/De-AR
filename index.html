@@ -272,26 +272,25 @@
                 const geo = new THREE.ShapeGeometry(shape);
                 const ent = document.createElement('a-entity');
 
-                // Wireframe Preview
                 const edgeGeo = new THREE.BufferGeometry().setFromPoints([...this.pts, this.pts[0]]);
-                const previewLines = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({color: COLOR_DEFAULT_ZONE}));
-                ent.setObject3D('preview', previewLines);
-                ent.setAttribute('position', this.org); ent.object3D.quaternion.copy(this.bQuat);
-                ent.setAttribute('grabbable', ''); ent.classList.add('magic-mask');
+                
+                // Convert immediately to Mask without preview delay
+                const mats = getMagicMaterials();
+                ent.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
+                
+                const outline = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({
+                    color: COLOR_DEFAULT_ZONE, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.NotEqualStencilFunc, stencilZPass: THREE.KeepStencilOp
+                }));
+                ent.setObject3D('outline', outline);
+                
+                ent.setAttribute('position', this.org); 
+                ent.object3D.quaternion.copy(this.bQuat);
+                ent.setAttribute('grabbable', ''); 
+                ent.classList.add('magic-mask');
                 this.el.sceneEl.appendChild(ent);
 
-                // Convert to Mask
-                setTimeout(() => {
-                    ent.removeObject3D('preview');
-                    const mats = getMagicMaterials();
-                    ent.setObject3D('mask', new THREE.Mesh(geo, mats.maskMat));
-                    const outline = new THREE.Line(edgeGeo, new THREE.LineBasicMaterial({
-                        color: COLOR_DEFAULT_ZONE, stencilWrite: true, stencilRef: 1, stencilFunc: THREE.NotEqualStencilFunc, stencilZPass: THREE.KeepStencilOp
-                    }));
-                    ent.setObject3D('outline', outline);
-                    activeMasksCount++;
-                    document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
-                }, PREVIEW_DURATION);
+                activeMasksCount++;
+                document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(true));
             }
         });
 
@@ -335,18 +334,34 @@
         AFRAME.registerComponent('hub-controller', {
             init: function() {
                 const btns = document.querySelectorAll('.menu-btn');
-                btns.forEach(btn => {
-                    btn.addEventListener('click', () => {
-                        window.ActiveMode = btn.id.replace('btn-', '');
+                
+                // 将原有的点击逻辑提取出来，方便空间捏合调用
+                this.selectMenu = (btn) => {
+                    window.ActiveMode = btn.id.replace('btn-', '');
+                    
+                    // Visual Feedback for Menu
+                    btns.forEach(b => b.setAttribute('color', '#333')); btn.setAttribute('color', '#007AFF');
+                    document.querySelector('#modeText').setAttribute('value', 'Active: ' + window.ActiveMode.toUpperCase());
+                    
+                    // Clear all existing masks when switching modes
+                    document.querySelectorAll('.magic-window, .magic-mask').forEach(el => el.parentNode.removeChild(el));
+                    activeMasksCount = 0;
+                    document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(false));
+                };
+
+                // 空间捏合点击逻辑
+                this.el.sceneEl.addEventListener('pinchstarted', (evt) => {
+                    const pinchPos = evt.detail.position; 
+                    if (!pinchPos) return;
+
+                    btns.forEach(btn => {
+                        const btnPos = new THREE.Vector3();
+                        btn.object3D.getWorldPosition(btnPos);
                         
-                        // Visual Feedback for Menu
-                        btns.forEach(b => b.setAttribute('color', '#333')); btn.setAttribute('color', '#007AFF');
-                        document.querySelector('#modeText').setAttribute('value', 'Active: ' + window.ActiveMode.toUpperCase());
-                        
-                        // Clear all existing masks when switching modes
-                        document.querySelectorAll('.magic-window, .magic-mask').forEach(el => el.parentNode.removeChild(el));
-                        activeMasksCount = 0;
-                        document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(false));
+                        // 距离判定：15cm范围内触发
+                        if (pinchPos.distanceTo(btnPos) < 0.15) {
+                            this.selectMenu(btn);
+                        }
                     });
                 });
             }
@@ -356,10 +371,19 @@
         AFRAME.registerComponent('menu-spawner', {
             init: function() {
                 this.el.sceneEl.addEventListener('enter-vr', () => {
-                    const cam = document.getElementById('mainCamera').object3D;
-                    const offset = new THREE.Vector3(0.3, 0, -0.6); 
-                    this.el.object3D.position.copy(offset.applyMatrix4(cam.matrixWorld));
-                    this.el.object3D.lookAt(cam.getWorldPosition(new THREE.Vector3()));
+                    const camObj = document.getElementById('mainCamera').object3D;
+                    // 新位置：X设为0.3（靠右），Y设为-0.8（更低），Z设为-0.5（距离不变）
+                    const offset = new THREE.Vector3(0.3, -0.8, -0.5); 
+                    this.el.object3D.position.copy(offset.applyMatrix4(camObj.matrixWorld));
+                    
+                    // 模拟看书的角度：绕 X 轴仰起 -60度
+                    const targetRotation = new THREE.Euler(
+                        THREE.MathUtils.degToRad(-60),
+                        camObj.rotation.y, 
+                        0, 
+                        'YXZ'
+                    );
+                    this.el.object3D.setRotationFromEuler(targetRotation);
                 });
             }
         });
@@ -368,7 +392,6 @@
 <body>
     <a-scene xr-mode-ui="XRMode: ar" renderer="stencil: true; colorManagement: true;">
         <a-camera id="mainCamera">
-            <a-cursor position="0 0 -0.7" fuse="false" raycaster="objects: .menu-btn" color="#007AFF"></a-cursor>
             <a-text id="modeText" value="Select a Module" position="0 0.3 -0.8" align="center" scale="0.2"></a-text>
         </a-camera>
         <a-entity id="menu-panel" menu-spawner hub-controller position="0.3 1.5 -0.6">
