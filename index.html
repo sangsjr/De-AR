@@ -14,13 +14,88 @@
         const PREVIEW_DURATION = 1000;    // Duration for previewing the original geometry (1s)
         const COLOR_DEFAULT_ZONE = '#007AFF'; // Primary UI and Wireframe color
         const ELEMENT_SIZE = 0.1; // Base size for randomly spawned objects
+        const RAY_VISIBLE_DISTANCE = 0.2; // Display rays within 20cm of the menu
 
         // State Variables
         window.ActiveMode = 'none'; // Current active module: 'plane', 'shapes', 'draw'
         window.DrawState = { enabled: false }; // State for 'draw' module: enabled or disabled
         let activeMasksCount = 0; // Number of active "Magic Mask" in the scene
         
-        
+        // ---------------------------------------------------
+        // Set the Raycaster, making the ray parallel to the index finger
+        // ---------------------------------------------------
+        AFRAME.registerComponent('hand-ray-sync', {
+            schema: { hand: {type: 'string', default: 'left'} },
+            tick: function() {
+                const sceneEl = this.el.sceneEl;
+                if (!sceneEl || !sceneEl.frame || !sceneEl.renderer.xr) return;
+                
+                const xr = sceneEl.renderer.xr;
+                const session = xr.getSession();
+                
+                if (!session) {
+                    this.el.object3D.visible = false;
+                    return;
+                }
+                
+                let targetSource = null;
+                for (const source of session.inputSources) {
+                    if (source.handedness === this.data.hand) {
+                        targetSource = source;
+                        break;
+                    }
+                }
+                
+                if (targetSource) {
+                    const refSpace = xr.getReferenceSpace();
+                    if (!refSpace) return;
+
+                    // 1. Use hand skeleton tracking data (XRHand API)
+                    if (targetSource.hand) {
+                        // Obtain the tip of the index finger and the proximal joint of the index finger root.
+                        const indexTip = targetSource.hand.get('index-finger-tip');
+                        const indexBase = targetSource.hand.get('index-finger-phalanx-proximal');
+                        
+                        if (indexTip && indexBase) {
+                            const tipPose = sceneEl.frame.getJointPose(indexTip, refSpace);
+                            const basePose = sceneEl.frame.getJointPose(indexBase, refSpace);
+                            
+                            if (tipPose && basePose) {
+                                // Extract Three.js vector
+                                const vecTip = new THREE.Vector3(tipPose.transform.position.x, tipPose.transform.position.y, tipPose.transform.position.z);
+                                const vecBase = new THREE.Vector3(basePose.transform.position.x, basePose.transform.position.y, basePose.transform.position.z);
+                                
+                                // Calculate the direction vector from the root to the fingertip
+                                const dir = new THREE.Vector3().subVectors(vecTip, vecBase).normalize();
+                                
+                                // Set the starting point of the ray at the tip of the index finger
+                                this.el.object3D.position.copy(vecTip);
+                                this.el.object3D.lookAt(vecTip.clone().sub(dir));
+                                
+                                this.el.object3D.visible = true;
+                                return;
+                            }
+                        }
+                    }
+
+                    // 2. Insurance plan
+                    // If a single finger skeleton cannot be read on certain devices, return to the standard targetRaySpace
+                    if (targetSource.targetRaySpace) {
+                        const pose = sceneEl.frame.getPose(targetSource.targetRaySpace, refSpace);
+                        if (pose) {
+                            const p = pose.transform.position;
+                            const q = pose.transform.orientation;
+                            this.el.object3D.position.set(p.x, p.y, p.z);
+                            this.el.object3D.quaternion.set(q.x, q.y, q.z, q.w);
+                            this.el.object3D.visible = true;
+                            return;
+                        }
+                    }
+                }
+                
+                this.el.object3D.visible = false;
+            }
+        });
 
         // ---------------------------------------------------
         // 2. CORE RENDERING COMPONENTS (Stencil Buffer Logic)
@@ -335,7 +410,6 @@
             init: function() {
                 const btns = document.querySelectorAll('.menu-btn');
                 
-                // 将原有的点击逻辑提取出来，方便空间捏合调用
                 this.selectMenu = (btn) => {
                     window.ActiveMode = btn.id.replace('btn-', '');
                     
@@ -349,21 +423,74 @@
                     document.querySelectorAll('[apply-magic-shader]').forEach(o => o.components['apply-magic-shader'].updateStencil(false));
                 };
 
-                // 空间捏合点击逻辑
-                this.el.sceneEl.addEventListener('pinchstarted', (evt) => {
-                    const pinchPos = evt.detail.position; 
-                    if (!pinchPos) return;
+                // Right hand: hand-ray-sync component
+                const createRaycasterEntity = (handName) => {
+                    const rayEl = document.createElement('a-entity');
+                    rayEl.setAttribute('hand-ray-sync', `hand: ${handName}`); 
+                    rayEl.setAttribute('raycaster', 'objects: .menu-btn; showLine: true; lineColor: #007AFF;');
+                    this.el.sceneEl.appendChild(rayEl);
+                    return rayEl;
+                };
 
-                    btns.forEach(btn => {
-                        const btnPos = new THREE.Vector3();
-                        btn.object3D.getWorldPosition(btnPos);
-                        
-                        // 距离判定：15cm范围内触发
-                        if (pinchPos.distanceTo(btnPos) < 0.15) {
-                            this.selectMenu(btn);
+                this.rightRay = createRaycasterEntity('right');
+                
+                // Distance Touch Status Variable
+                this.lastHitBtn = null;
+                this.cooldown = 0;
+            },
+            
+            // Use tick to detect distance per frame
+            // Implement dynamic ray and click effect
+            tick: function(time, timeDelta) {
+                // 1. Dynamic ray visibility (based on global variable distance)
+                const menuEl = document.getElementById('menu-panel');
+                if (menuEl && this.rightRay) {
+                    const menuPos = new THREE.Vector3();
+                    menuEl.object3D.getWorldPosition(menuPos);
+                    const handPos = new THREE.Vector3();
+                    this.rightRay.object3D.getWorldPosition(handPos);
+                    
+                    // Determine whether to display the ray
+                    const isNear = handPos.distanceTo(menuPos) < RAY_VISIBLE_DISTANCE;
+                    if (this.rightRay.hasAttribute('line')) {
+                        // Setting transparency to control visibility
+                        this.rightRay.setAttribute('line', 'opacity', isNear ? 1 : 0);
+                    }
+                }
+
+                // 2. Spatial click judgment
+                // If in cooling state, reduce cooling time
+                if (this.cooldown > 0) {
+                    this.cooldown -= timeDelta;
+                    return;
+                }
+
+                const raycaster = this.rightRay.components.raycaster;
+                
+                // Ensure that raycaster is running and has intersections
+                if (raycaster && raycaster.intersections && raycaster.intersections.length > 0) {
+                    const hitEl = raycaster.intersectedEls[0];
+                    const distance = raycaster.intersections[0].distance; // The exact distance from fingertip to button
+
+                    // If the ray passed through the menu button
+                    if (hitEl && hitEl.classList.contains('menu-btn')) {
+                        // Click the detection threshold: 3 cm
+                        // If it is less than this distance, it is judged that the fingertip clicked the button!
+                        if (distance < 0.03) {
+                            if (this.lastHitBtn !== hitEl) {
+                                this.selectMenu(hitEl);
+                                this.lastHitBtn = hitEl;
+                                this.cooldown = 1000; // Click cooldown: locked for 1 second after a successful select
+                            }
+                        } else {
+                            // If the distance is greater than 3cm, you can prepare for the next click.
+                            this.lastHitBtn = null;
                         }
-                    });
-                });
+                    }
+                } else {
+                    // No contact with anything, reset status
+                    this.lastHitBtn = null;
+                }
             }
         });
 
@@ -372,13 +499,13 @@
             init: function() {
                 this.el.sceneEl.addEventListener('enter-vr', () => {
                     const camObj = document.getElementById('mainCamera').object3D;
-                    // 新位置：X设为0.3（靠右），Y设为-0.8（更低），Z设为-0.5（距离不变）
+                    // Menu location
                     const offset = new THREE.Vector3(0.3, -0.8, -0.5); 
                     this.el.object3D.position.copy(offset.applyMatrix4(camObj.matrixWorld));
                     
-                    // 模拟看书的角度：绕 X 轴仰起 -60度
+                    // Raise around the X axis -60 degrees
                     const targetRotation = new THREE.Euler(
-                        THREE.MathUtils.degToRad(-60),
+                        THREE.MathUtils.degToRad(-60), // Menu tilt angle
                         camObj.rotation.y, 
                         0, 
                         'YXZ'
