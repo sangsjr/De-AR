@@ -73,4 +73,4 @@ Use the **Floating AR Menu** to switch between the following three modes. Each m
 - **Spatial Morphing (2D to 3D)**:
   
   - Grab any recognized 2D shape and push it away from you.
-  - Once the shape is moved **50 cm away** from the camera's original position, the 2D plane will magically inflate into a 1:1 3D volumetric mask (**Circle $\rightarrow$ Sphere, Rectangle $\rightarrow$ Box, Triangle $\rightarrow$ Cone**).
+  - Once the shape is moved **50 cm away** from the camera's original position, the 2D plane will magically inflate into a 3D volumetric mask (**Circle $\rightarrow$ Sphere, Rectangle $\rightarrow$ Box, Triangle $\rightarrow$ Cone**).
