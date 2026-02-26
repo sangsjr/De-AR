@@ -34,6 +34,14 @@ This function returns two specific materials for every window:
 
 2. **Outline Material (The Blue Border):** Uses a **Vertex Shader**. It takes the original geometry and pushes the vertices outward along their normals (`pos = position + normal * thickness`). This creates the blue frame without overlapping the "hole" created by the mask.
 
+### `hand-ray-sync` (Anatomical Raycasting)
+
+This component dynamically binds a hidden raycaster to the user's actual index finger using the WebXR `XRHand` API. By calculating the directional vector between the index finger's proximal joint (`index-finger-phalanx-proximal`) and its tip (`index-finger-tip`), it ensures the interaction ray perfectly aligns with the anatomical pointing direction of the finger, rather than defaulting to the forearm/wrist angle.
+
+### `smart-morphable` (Spatial Volumetric Morphing)
+
+Attached to algorithmically recognized 2D shapes, this component monitors the object's distance from the camera. If the user physically "pushes" the 2D window more than 50cm away from its original spawn point relative to the camera, it triggers a spatial transformation. It morphs the 2D plane into a 1:1 volumetric 3D counterpart (e.g., Rectangle to Box, Circle to Sphere, Triangle to Cone), utilizing the standard 1-second wireframe preview transition during the shift.
+
 ---
 
 ## 3. The Two-Stage Object Lifecycle
@@ -62,11 +70,12 @@ After 1 second, the `setTimeout` function triggers the transformation:
 
 ## 4. Mode-Specific Implementation
 
-| **Module**    | **Geometry Logic** | **Spatial Logic**                                                                                                                                                |
-| ------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **2D Window** | `PlaneGeometry`    | Uses `object3D.lookAt(camera)` on spawn to ensure the window faces the user.                                                                                     |
-| **3D Shapes** | `Cone` / `Box`     | Creates a 3D volume of invisibility. Objects inside the volume disappear from all angles.                                                                        |
-| **Draw Any**  | `ShapeGeometry`    | Collects a series of 3D points from hand tracking, projects them onto a 2D plane based on the camera orientation, and generates a custom mesh via `THREE.Shape`. |
+| **Module**     | **Geometry Logic**                            | **Spatial Logic**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **2D Window**  | `PlaneGeometry`                               | Uses `object3D.lookAt(camera)` on spawn to ensure the window faces the user.                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **3D Shapes**  | `Cone` / `Box`                                | Creates a 3D volume of invisibility. Objects inside the volume disappear from all angles.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Draw Any**   | `ShapeGeometry`                               | Collects a series of 3D points from hand tracking, projects them onto a 2D plane based on the camera orientation, and generates a custom mesh via `THREE.Shape`.                                                                                                                                                                                                                                                                                                                                  |
+| **Smart Draw** | 2D: `ShapeGeometry` 3D: `Sphere / Box / Cone` | 1. Auto-Detection: Analyzes hand-drawn 2D points using the Isoperimetric Quotient ($Q = \frac{P^2}{A}$) to snap rough sketches into perfect 2D Circles, Rectangles, or Triangles (Note: Triangles use CircleGeometry with 3 segments). Complex shapes fall back to raw ShapeGeometry.<br/>2. Z-Axis Morphing: If the user physically pushes a recognized 2D shape >50cm away from the camera, it triggers a spatial morph into its corresponding 3D volumetric equivalent (Sphere, Box, or Cone). |
 
 ---
 
@@ -79,5 +88,3 @@ The code is designed for easy "hand-feel" tuning via constants:
 - `PREVIEW_DURATION`: Adjusts the transition speed from "Physical" to "Magic".
 
 - `COLOR_DEFAULT_ZONE`: Standardizes the visual identity of the AR interface.
-
-
