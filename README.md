@@ -6,9 +6,25 @@ This repository explored different methods of creating "Magic Windows/Volumes" i
 
 To run the project locally, ensure you have [Node.js](https://nodejs.org/) installed, then execute:
 
+1. Ensure your computer/laptop and Meta Quest are connected to the **same Wi-Fi network**.
+2. Open your terminal, navigate to the project directory, and run the development server:
+
 ```
 npm run dev
 ```
+
+3. You will see an output similar to this in your terminal:
+
+```
+➜ Local: https://localhost:5173/
+➜ Network: https://<YOUR_LOCAL_IP>:5173/
+```
+
+4. Open the **Browser** inside your Quest and navigate to the `Network` URL provided in your terminal (e.g., `https://192.168.1.100:5173/`).
+
+5. Since this is a local development server, you will likely see a security warning. Click **Advanced** and then select **Proceed to...** (or Continue) to load the page.
+
+6. Once the page loads, click the **AR** button in the bottom right corner to enter the system.
 
 ## Interaction Guide
 
